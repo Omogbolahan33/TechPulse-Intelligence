@@ -1,0 +1,6 @@
+{
+  "appId": "com.techpulse.intelligence",
+  "appName": "TechPulse",
+  "webDir": "dist",
+  "bundledWebRuntime": false
+}

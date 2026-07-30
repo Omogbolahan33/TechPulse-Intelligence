@@ -1,0 +1,5 @@
+{
+  "name": "TechPulse Intelligence",
+  "description": "The ultimate AI-powered news network for tech and careers. Get real-time updates, interactive quizzes, and synthesized insights delivered in a high-speed mobile experience.",
+  "requestFramePermissions": ["camera", "geolocation"]
+}

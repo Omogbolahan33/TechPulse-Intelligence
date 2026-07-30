@@ -1,0 +1,100 @@
+{
+  "entities": {
+    "Comment": {
+      "title": "Comment",
+      "description": "A user comment on a news article",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique ID of the comment" },
+        "articleId": { "type": "string", "description": "ID of the article this comment belongs to" },
+        "userId": { "type": "string", "description": "UID of the user who posted the comment" },
+        "userName": { "type": "string", "description": "Display name of the user" },
+        "userPhoto": { "type": "string", "description": "Photo URL of the user" },
+        "text": { "type": "string", "description": "The comment content" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Timestamp when the comment was created" }
+      },
+      "required": ["articleId", "userId", "userName", "text", "createdAt"]
+    },
+    "NewsArticle": {
+      "title": "NewsArticle",
+      "description": "A cached news article",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "summary": { "type": "string" },
+        "category": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "source": { "type": "string" },
+        "imageUrl": { "type": "string" },
+        "url": { "type": "string" },
+        "region": { "type": "string" },
+        "fetchedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "title", "summary", "category", "timestamp", "source", "imageUrl", "url", "region", "fetchedAt"]
+    },
+    "NewsSynthesis": {
+      "title": "NewsSynthesis",
+      "description": "Pre-synthesized content for a news article",
+      "type": "object",
+      "properties": {
+        "articleId": { "type": "string" },
+        "url": { "type": "string" },
+        "source": { "type": "string" },
+        "fullContent": { "type": "string" },
+        "keyTakeaways": { "type": "array", "items": { "type": "string" } },
+        "quiz": { "type": "array" },
+        "flashcards": { "type": "array" },
+        "videoScript": { "type": "string" },
+        "podcastScript": { "type": "string" },
+        "synthesizedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["articleId", "fullContent", "keyTakeaways", "quiz", "flashcards", "synthesizedAt"]
+    },
+    "Like": {
+      "title": "Like",
+      "description": "A user like on an article or comment",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "targetId": { "type": "string" },
+        "targetType": { "type": "string", "enum": ["article", "comment"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "targetId", "targetType", "createdAt"]
+    },
+    "Bookmark": {
+      "title": "Bookmark",
+      "description": "A user bookmarked article",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "articleId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "articleId", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/news/{articleId}": {
+      "schema": "NewsArticle",
+      "description": "Cached news articles for fast retrieval"
+    },
+    "/synthesis/{articleId}": {
+      "schema": "NewsSynthesis",
+      "description": "Pre-synthesized content for news articles"
+    },
+    "/articles/{articleId}/comments/{commentId}": {
+      "schema": "Comment",
+      "description": "Comments associated with a specific article"
+    },
+    "/likes/{likeId}": {
+      "schema": "Like",
+      "description": "User likes on articles or comments"
+    },
+    "/bookmarks/{bookmarkId}": {
+      "schema": "Bookmark",
+      "description": "User bookmarked articles"
+    }
+  }
+}

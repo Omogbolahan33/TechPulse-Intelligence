@@ -1,0 +1,132 @@
+// ===============================================================
+// Assumed Data Model
+// ===============================================================
+//
+// Collection: /articles/{articleId}/comments
+// Document ID: {commentId}
+// Fields:
+//   - articleId: string (required) - The ID of the article
+//   - userId: string (required, immutable) - The UID of the author
+//   - userName: string (required) - Display name of the author
+//   - userPhoto: string (optional) - Photo URL of the author
+//   - text: string (required, max 500 chars) - The comment text
+//   - createdAt: timestamp (required, immutable) - Creation time
+//
+// Collection: /news/{articleId}
+// Document ID: {articleId}
+// Fields:
+//   - id: string (required)
+//   - title: string (required)
+//   - summary: string (required)
+//   - category: string (required)
+//   - timestamp: string (required)
+//   - source: string (required)
+//   - imageUrl: string (required)
+//   - region: string (required)
+//   - fetchedAt: string (required)
+//
+// Collection: /synthesis/{articleId}
+// Document ID: {articleId}
+// Fields:
+//   - articleId: string (required)
+//   - url: string (required)
+//   - source: string (required)
+//   - fullContent: string (required)
+//   - keyTakeaways: list (required)
+//   - quiz: list (required)
+//   - flashcards: list (required)
+//   - videoScript: string (required)
+//   - podcastScript: string (required)
+//   - synthesizedAt: string (required)
+//
+// ===============================================================
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isValidComment(data) {
+      return data.keys().hasAll(['articleId', 'userId', 'userName', 'text', 'createdAt']) &&
+             data.articleId is string &&
+             data.userId == request.auth.uid &&
+             data.userName is string && data.userName.size() > 0 && data.userName.size() < 100 &&
+             data.text is string && data.text.size() > 0 && data.text.size() <= 500 &&
+             data.createdAt is timestamp;
+    }
+
+    // News collection
+    match /news/{articleId} {
+      allow read: if true;
+      // Allow write for prefetching (In production, this should be restricted to a service account or admin)
+      allow write: if true;
+    }
+
+    // Synthesis collection
+    match /synthesis/{articleId} {
+      allow read: if true;
+      // Allow write for pre-synthesis (In production, this should be restricted)
+      allow write: if true;
+    }
+
+    // Articles collection (implicit read for comments)
+    match /articles/{articleId} {
+      allow read: if true;
+
+      match /comments/{commentId} {
+        // Anyone can read comments
+        allow read: if true;
+        
+        // Only authenticated users can create comments for themselves
+        allow create: if isAuthenticated() && isValidComment(request.resource.data);
+        
+        // Only the owner can delete their comment
+        allow delete: if isAuthenticated() && isOwner(resource.data.userId);
+
+        // Comments are immutable for now (no updates)
+        allow update: if false;
+      }
+    }
+
+    // Likes collection
+    match /likes/{likeId} {
+      // Anyone can see like counts
+      allow read: if true;
+      
+      // Only authenticated users can like/unlike
+      allow create: if isAuthenticated() && 
+                      request.resource.data.userId == request.auth.uid &&
+                      likeId == request.auth.uid + "_" + request.resource.data.targetId;
+      
+      allow delete: if isAuthenticated() && isOwner(resource.data.userId);
+    }
+
+    // Bookmarks collection
+    match /bookmarks/{bookmarkId} {
+      // Only the owner can read their bookmarks. 
+      // We allow read if the document doesn't exist (resource == null) 
+      // or if the authenticated user is the owner.
+      allow read: if isAuthenticated() && (resource == null || isOwner(resource.data.userId));
+      
+      // Only authenticated users can bookmark for themselves
+      allow create: if isAuthenticated() && 
+                      request.resource.data.userId == request.auth.uid &&
+                      bookmarkId == request.auth.uid + "_" + request.resource.data.articleId;
+      
+      allow delete: if isAuthenticated() && isOwner(resource.data.userId);
+    }
+
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

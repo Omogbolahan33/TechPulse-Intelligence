@@ -1,0 +1,73 @@
+{
+  "name": "TechPulse Intelligence",
+  "short_name": "TechPulse",
+  "description": "TechPulse Intelligence is a premium AI-powered technology and career intelligence network. It provides real-time tech updates, synthesized professional insights, and career growth intelligence for the modern professional.",
+  "lang": "en-US",
+  "dir": "ltr",
+  "start_url": "/",
+  "id": "/?source=pwa_pulse",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "scope": "/",
+  "share_target": {
+    "action": "/",
+    "method": "GET",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "url": "url"
+    }
+  },
+  "categories": ["news", "productivity", "education"],
+  "icons": [
+    {
+      "src": "https://picsum.photos/seed/tp_logo_192/192/192",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "https://picsum.photos/seed/tp_logo_512/512/512",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "https://picsum.photos/seed/tp_maskable_192/192/192",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "https://picsum.photos/seed/tp_maskable_512/512/512",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Latest Intelligence",
+      "short_name": "Latest",
+      "url": "/?shortcut=latest",
+      "icons": [{ "src": "https://picsum.photos/seed/tp_news/96/96", "sizes": "96x96" }]
+    },
+    {
+      "name": "Global Search",
+      "short_name": "Search",
+      "url": "/?search=true",
+      "icons": [{ "src": "https://picsum.photos/seed/tp_search/96/96", "sizes": "96x96" }]
+    }
+  ],
+  "screenshots": [
+    {
+      "src": "https://picsum.photos/seed/tp_screen1/1080/1920",
+      "sizes": "1080x1920",
+      "type": "image/png",
+      "form_factor": "narrow",
+      "label": "Feed View"
+    }
+  ]
+}
