@@ -1,15 +1,19 @@
-import { ai, MODELS } from "../lib/gemini";
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ * 
+ * News Service - Client-side service that proxies AI calls through the server.
+ * All AI operations are handled server-side to keep API keys secure.
+ */
+
 import { unifiedAI } from "./aiProvider";
-import { Type } from "@google/genai";
-import { getSourcesForSelection } from "./sourceConfig";
 import { db } from "../firebase";
 import { 
   collection, 
   query, 
   where, 
   getDocs, 
-  limit, 
-  orderBy,
+  limit,  orderBy,
   doc,
   setDoc,
   getDoc
@@ -173,94 +177,33 @@ export async function fetchLatestTechNews(
 
     const bestCachedNews = allNews[0]?.news || [];
 
-    // 3. Fallback to Gemini AI Search (Slow)
+    // 3. Fallback to AI Search via Server (Slow)
     if (skipAI) {
       console.log("Skipping AI fetch as requested.");
       return bestCachedNews;
     }
 
-    console.log("Cache miss or stale content. Fetching fresh news from AI...");
+    console.log("Cache miss or stale content. Fetching fresh news from AI via server...");
     
     const today = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
-    const categoryPrompt = category === "All" ? "technology, startups, and innovation" : `${category}`;
-    const regionPrompt = region === "Global" ? "globally" : `in ${region}`;
 
-    const prompt = `
-      Today is ${today}. 
-      Use Google Search to find exactly 8 HIGH-IMPACT, BREAKING news stories published within the LAST 24 HOURS specifically about ${categoryPrompt} ${regionPrompt}.
-      
-      REQUIREMENTS:
-      1. ARTICLES MUST BE RECENT: Only include news published since yesterday.
-      2. VERBATIM TITLES: Use the actual original headline as the 'title'.
-      3. ACCURATE TIMESTAMPS: Use the exact publication time in ISO 8601 format.
-      4. REAL SOURCES: Use the official name of the publication (e.g., 'Reuters', 'TechCrunch').
-      5. DIVERSITY: Avoid duplicate stories or different sources for the same story.
-      
-      Return a JSON array of objects with these fields:
-      - title: string (the original headline)
-      - summary: string (2-3 sentences of core facts)
-      - category: string (one of: AI, Software, Hardware, Startups, Cloud, Jobs)
-      - timestamp: string (ISO 8601 publication date)
-      - source: string (publisher name)
-      - imageUrl: string (valid direct HTTPS link to article image)
-      - url: string (valid direct HTTPS link to the article)
-    `;
-
-    let news: NewsArticle[] = [];
     try {
-      const aiResponse = await unifiedAI.generateContent({
-        contents: prompt,
-        config: {
-          tools: [{ googleSearch: {} }],
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                title: { type: Type.STRING },
-                summary: { type: Type.STRING },
-                category: { type: Type.STRING },
-                timestamp: { type: Type.STRING, format: "date-time" },
-                source: { type: Type.STRING },
-                imageUrl: { type: Type.STRING },
-                url: { type: Type.STRING },
-              },
-              required: ["title", "summary", "category", "timestamp", "source", "imageUrl", "url"],
-            },
-          },
-        },
-      });
-
-      let rawNews: any = [];
-      try {
-        const text = aiResponse.text || "[]";
-        // Robust JSON extraction: Strip markdown code blocks if they exist
-        const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/) || [null, text];
-        const jsonContent = (jsonMatch[1] || text).trim();
-        rawNews = JSON.parse(jsonContent);
-      } catch (e) {
-        console.error("AI News JSON Parsing failed:", e);
-        rawNews = [];
-      }
-
-      // Robustly handle different potential AI-generated structures (array vs wrapped object)
-      const newsArray = Array.isArray(rawNews) 
-        ? rawNews 
-        : (rawNews.news || rawNews.articles || rawNews.items || rawNews.data || []);
+      // Use the server-side AI proxy
+      const news = await unifiedAI.generateNews(category, region, today, existingIds);
       
-      news = newsArray.map((item: any) => {
+      // Process and cache the news
+      const processedNews = news.map((item: any) => {
         const absoluteUrl = ensureAbsoluteUrl(item.url);
         return {
           ...item,
           url: absoluteUrl,
           imageUrl: ensureAbsoluteUrl(item.imageUrl),
-          id: generateStableId(absoluteUrl), // Use robust ID generation
+          id: generateStableId(absoluteUrl),
         };
       });
       
       // Save to Firestore in background
-      news.forEach(article => {
+      processedNews.forEach(article => {
         const articleRef = doc(db, "news", article.id);
         setDoc(articleRef, {
           ...article,
@@ -268,13 +211,12 @@ export async function fetchLatestTechNews(
           fetchedAt: new Date().toISOString()
         }, { merge: true }).catch(err => console.error("Error caching article:", err));
       });
+
+      return processedNews.length > 0 ? processedNews : bestCachedNews;
     } catch (aiError) {
       console.error("AI news fetch failed, falling back to cached results:", aiError);
-      // If AI fails, we return whatever we found in Firestore earlier
       return bestCachedNews.length > 0 ? bestCachedNews : [];
     }
-
-    return news.length > 0 ? news : bestCachedNews;
   } catch (error) {
     console.error("Error fetching news:", error);
     return [];
@@ -287,49 +229,22 @@ export async function searchNews(query: string): Promise<NewsArticle[]> {
       console.log("Skipping AI search on server.");
       return [];
     }
-    const response = await unifiedAI.generateContent({
-      contents: `Search for 8 current news stories related to the query: "${query}". Include a high-quality article image URL for each. Ensure all URLs (imageUrl and url) are absolute https links. Return JSON.`,
-      config: {
-        tools: [{ googleSearch: {} }],
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              id: { type: Type.STRING },
-              title: { type: Type.STRING },
-              summary: { type: Type.STRING },
-              category: { type: Type.STRING },
-              timestamp: { type: Type.STRING },
-              source: { type: Type.STRING },
-              imageUrl: { type: Type.STRING },
-              url: { type: Type.STRING },
-            },
-            required: ["id", "title", "summary", "category", "timestamp", "source", "imageUrl", "url"],
-          },
-        },
-      },
-    }).catch(err => {
-      if (isRateLimitError(err)) {
-        throw new Error("Search capacity exceeded. Please wait a moment.");
-      }
-      throw err;
-    });
 
-    const rawNews = JSON.parse(response.text || "[]") as NewsArticle[];
-    const news = rawNews.map(n => {
+    // Use the server-side AI proxy
+    const news = await unifiedAI.searchNews(query);
+    
+    const processedNews = news.map((n: any) => {
       const absoluteUrl = ensureAbsoluteUrl(n.url);
       return {
         ...n,
         url: absoluteUrl,
         imageUrl: ensureAbsoluteUrl(n.imageUrl),
-        id: btoa(absoluteUrl).replace(/[/+=]/g, '').slice(0, 20), // Ensure stable ID from URL
+        id: generateStableId(absoluteUrl),
       };
     });
     
     // Cache search results too
-    news.forEach(article => {
+    processedNews.forEach(article => {
       const articleRef = doc(db, "news", article.id);
       setDoc(articleRef, {
         ...article,
@@ -338,7 +253,7 @@ export async function searchNews(query: string): Promise<NewsArticle[]> {
       }, { merge: true }).catch(err => console.error("Error caching search result:", err));
     });
 
-    return news;
+    return processedNews;
   } catch (error) {
     console.error("Error searching news:", error);
     return [];
@@ -363,7 +278,7 @@ export async function fetchArticleByUrl(url: string): Promise<NewsArticle | null
       category: "Intelligence",
       timestamp: new Date().toISOString(),
       source: new URL(cleanUrl).hostname.replace('www.', ''),
-      imageUrl: meta.image || `https://picsum.photos/seed/${generateStableId(cleanUrl)}/800/600`,
+      imageUrl: meta.image || null,
       url: cleanUrl
     };
 
@@ -435,114 +350,31 @@ export async function getArticleDetails(article: NewsArticle): Promise<ArticleCo
       }
     }
 
-    // 3. Fallback to Gemini AI Generation (Slow) - STAGGERED: Only fetch Analysis first
+    // 3. Fallback to AI Generation via Server (Slow)
     if (typeof window === 'undefined') {
       console.log("Skipping AI synthesis on server.");
       return null;
     }
-    console.log("Synthesis cache miss. Generating Analysis with AI...");
-    const response = await unifiedAI.generateContent({
-      contents: `Generate a high-impact, tactical intelligence synthesis for the following article.
-      
-      Title: "${articleTitle}"
-      Summary: "${article.summary}"
-      Source: "${source}"
-      URL: "${url}"
-      
-      You MUST return your response as a VALID JSON object with the following EXACT structure:
-      {
-        "fullContent": "A deep, comprehensive analysis of the news, its context, and its profound significance (minimum 3-4 detailed paragraphs).",
-        "keyTakeaways": ["Takeaway 1", "Takeaway 2", "Takeaway 3", "Takeaway 4", "Takeaway 5"],
-        "implications": {
-          "digest": "A high-impact executive summary for board-level briefing.",
-          "pros": [
-            { "persona": "Persona Name", "insight": "Strategic benefit", "actionPlan": "Execution steps" }
-          ],
-          "cons": [
-            { "persona": "Persona Name", "insight": "Strategic risk", "actionPlan": "Mitigation steps" }
-          ]
-        }
-      }
-      
-      STRICT CONSTRAINTS:
-      - Use the keys provided above EXACTLY.
-      - DO NOT hallucinate. 
-      - The 'fullContent' must be substantive and professional.`,
-      config: {
-        tools: [{ googleSearch: {} }],
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            fullContent: { type: Type.STRING },
-            keyTakeaways: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-            },
-            implications: {
-              type: Type.OBJECT,
-              properties: {
-                pros: { 
-                  type: Type.ARRAY, 
-                  items: { 
-                    type: Type.OBJECT,
-                    properties: {
-                      persona: { type: Type.STRING },
-                      insight: { type: Type.STRING },
-                      actionPlan: { type: Type.STRING }
-                    },
-                    required: ["persona", "insight", "actionPlan"]
-                  } 
-                },
-                cons: { 
-                  type: Type.ARRAY, 
-                  items: { 
-                    type: Type.OBJECT,
-                    properties: {
-                      persona: { type: Type.STRING },
-                      insight: { type: Type.STRING },
-                      actionPlan: { type: Type.STRING }
-                    },
-                    required: ["persona", "insight", "actionPlan"]
-                  } 
-                },
-                digest: { type: Type.STRING }
-              },
-              required: ["pros", "cons", "digest"]
-            }
-          },
-          required: ["fullContent", "keyTakeaways", "implications"],
-        },
-      },
-    }).catch(err => {
-      if (isRateLimitError(err)) {
-        throw new Error("Synthesis capacity reached. Please try again later.");
-      }
-      throw err;
-    });
+    
+    console.log("Synthesis cache miss. Generating Analysis with AI via server...");
+    
+    // Use the server-side AI proxy
+    const analysis = await unifiedAI.generateSynthesis(articleTitle, article.summary, source || "", url || "");
+    
+    if (!analysis) {
+      return null;
+    }
 
-    let analysis: ArticleContent | null = null;
-    try {
-      const text = response.text || "";
-      // Robust extraction: Handle markdown JSON blocks
-      const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/) || [null, text];
-      const jsonContent = (jsonMatch[1] || text).trim();
-      analysis = JSON.parse(jsonContent) as ArticleContent;
-      
-      // Safety check: Fix missing fullContent if AI misnamed it
-      if (analysis && !analysis.fullContent) {
-        analysis.fullContent = (analysis as any).detailedExplanation || 
-                              (analysis as any).explanation || 
-                              (analysis as any).content || 
-                              "Deep analysis unavailable. Refer to original source.";
-      }
-    } catch (e) {
-      console.error("Failed to parse synthesis JSON:", e, response.text);
-      analysis = null;
+    // Safety check: Fix missing fullContent if AI misnamed it
+    if (!analysis.fullContent) {
+      analysis.fullContent = (analysis as any).detailedExplanation || 
+                            (analysis as any).explanation || 
+                            (analysis as any).content || 
+                            "Deep analysis unavailable. Refer to original source.";
     }
     
     // Cache Analysis in Firestore in background
-    if (analysis && articleId) {
+    if (articleId) {
       const synthesisRef = doc(db, "synthesis", articleId);
       setDoc(synthesisRef, {
         ...analysis,
@@ -566,41 +398,9 @@ export async function getArticleDetails(article: NewsArticle): Promise<ArticleCo
 
 export async function chatWithAI(articleTitle: string, context: string, message: string, history: { role: 'user' | 'model', text: string }[] = []): Promise<string> {
   try {
-    const isServer = typeof window === 'undefined';
-    
-    if (!isServer) {
-      const response = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ articleTitle, context, message, history })
-      });
-      if (!response.ok) throw new Error("Chat request failed");
-      const data = await response.json();
-      return data.response;
-    }
-
-    // Server-side direct call
-    const prompt = `
-      You are an elite career and technology consultant for the Enigma Engine.
-      The user is reading about: "${articleTitle}"
-      Context related to their specific question: "${context}"
-      
-      User's question: "${message}"
-      
-      Conversation History:
-      ${history.map(h => `${h.role === 'user' ? 'User' : 'Consultant'}: ${h.text}`).join('\n')}
-      
-      Provide a sharp, strategic, and practical answer. Keep it professional but engaging, with a "premium intelligence" tone.
-    `;
-
-    const result = await unifiedAI.generateContent({
-      contents: prompt,
-      config: {
-        tools: [{ googleSearch: {} }] // Allow search for fresh grounding
-      }
-    });
-
-    return result.text || "I'm sorry, I couldn't process that request at the moment.";
+    // Always use the server-side chat endpoint
+    const response = await unifiedAI.chat(articleTitle, context, message, history);
+    return response;
   } catch (error) {
     console.error("Chat error:", error);
     return "The intelligence network is currently experiencing heavy volume. Please try again shortly.";
@@ -631,66 +431,18 @@ export async function getArticleExtras(article: NewsArticle): Promise<Partial<Ar
       console.log("Skipping AI extras generation on server.");
       return null;
     }
-    console.log("Generating Extras with AI...");
-    const response = await unifiedAI.generateContent({
-      contents: `Generate interactive educational extras for the following news article:
-      Title: "${articleTitle}"
-      Summary: "${summary}"
-      Source: "${source}"
-
-      Include:
-      1. 3-question quiz (multiple choice).
-      2. 5 flashcards (front/back).
-      3. 1-min video script (engaging, social media style).
-      4. 2-min podcast script (conversational dialogue).
-      Return JSON.`,
-      config: {
-        tools: [{ googleSearch: {} }],
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            quiz: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  question: { type: Type.STRING },
-                  options: {
-                    type: Type.ARRAY,
-                    items: { type: Type.STRING },
-                  },
-                  correctAnswer: { type: Type.NUMBER },
-                  explanation: { type: Type.STRING },
-                },
-                required: ["question", "options", "correctAnswer", "explanation"],
-              },
-            },
-            flashcards: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  front: { type: Type.STRING },
-                  back: { type: Type.STRING },
-                },
-                required: ["front", "back"],
-              },
-            },
-            videoScript: { type: Type.STRING },
-            podcastScript: { type: Type.STRING },
-          },
-          required: ["quiz", "flashcards", "videoScript", "podcastScript"],
-        },
-      },
-    });
-
-    const extrasText = response.text || "";
-    const extrasMatch = extrasText.match(/```json\s*([\s\S]*?)\s*```/) || [null, extrasText];
-    const extrasContent = (extrasMatch[1] || extrasText).trim();
-    const extras = JSON.parse(extrasContent) as Partial<ArticleContent>;
     
-    if (extras && articleId) {
+    console.log("Generating Extras with AI via server...");
+    
+    // Use the server-side AI proxy
+    const extras = await unifiedAI.generateExtras(articleTitle, summary, source || "");
+    
+    if (!extras) {
+      return null;
+    }
+    
+    // Cache extras in Firestore
+    if (articleId) {
       const synthesisRef = doc(db, "synthesis", articleId);
       await setDoc(synthesisRef, {
         ...extras,
@@ -712,24 +464,20 @@ export async function generateAudio(text: string, voice: 'Kore' | 'Puck' | 'Char
       console.log("Skipping AI TTS on server.");
       return null;
     }
-    const response = await ai.models.generateContent({
-      model: MODELS.TTS,
-      contents: [{ parts: [{ text }] }],
-      config: {
-        responseModalities: ["AUDIO"],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: { voiceName: voice },
-          },
-        },
-      },
+    
+    // TTS is handled via server endpoint now
+    const response = await fetch('/api/ai/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, voice }),
     });
-
-    const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-    if (base64Audio) {
-      return `data:audio/mp3;base64,${base64Audio}`;
+    
+    if (!response.ok) {
+      throw new Error("TTS request failed");
     }
-    return null;
+    
+    const data = await response.json();
+    return data.audioUrl || null;
   } catch (error) {
     console.error("Error generating audio:", error);
     return null;

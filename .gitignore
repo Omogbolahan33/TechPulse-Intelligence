@@ -6,3 +6,27 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Firebase config files (DO NOT COMMIT - use CI secrets)
+google-services.json
+GoogleService-Info.plist
+firebase-applet-config.json
+!google-services.example.json
+!GoogleService-Info.example.plist
+!firebase-applet-config.example.json
+
+# Android
+android/app/google-services.json
+android/app/release/
+android/local.properties
+android/.gradle/
+android/build/
+android/app/build/
+
+# iOS
+ios/App/App/GoogleService-Info.plist
+ios/App/build/
+ios/App/Pods/
+ios/App/*.xcworkspace/xcuserdata/
+ios/App/*.xcodeproj/xcuserdata/
+ios/App/*.xcodeproj/project.xcworkspace/

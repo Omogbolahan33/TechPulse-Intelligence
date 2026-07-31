@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo, Suspense, lazy } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Home, 
@@ -18,15 +18,20 @@ import {
   RefreshCw,
   ArrowUp,
   ExternalLink,
-  MessageCircle
+  MessageCircle,
+  LayoutGrid,
+  X
 } from 'lucide-react';
-import { useInView } from 'react-intersection-observer';
 import { useMotionValue, useTransform, animate } from 'motion/react';
 import { NewsArticle, fetchLatestTechNews, searchNews, fetchArticleByUrl } from './services/newsService';
-import { FeedPost } from './components/FeedPost';
-import { LazyImage } from './components/LazyImage';
 import { cn } from './lib/utils';
-import { unifiedAI } from './services/aiProvider';
+import { logger } from './lib/logger';
+
+// Lazy load heavy components for better initial load
+const FeedPost = lazy(() => import('./components/FeedPost').then(m => ({ default: m.FeedPost })));
+const LazyImage = lazy(() => import('./components/LazyImage').then(m => ({ default: m.LazyImage })));
+const NewsCard = lazy(() => import('./components/NewsCard').then(m => ({ default: m.NewsCard })));
+const ArticleView = lazy(() => import('./components/ArticleView').then(m => ({ default: m.ArticleView })));
 
 const CATEGORIES = [
   "All", "Tech", "Jobs", "Hiring", "Remote Work", "Career Advice", "Gig Economy", "Autonomous Agents", "Payments", "Fintech", "Cybersecurity", "Web3", "Hardware", "Biotech", "SaaS",
@@ -92,10 +97,25 @@ export default function App() {
   const [pendingNews, setPendingNews] = useState<NewsArticle[]>([]);
   const [pullDistance, setPullDistance] = useState(0);
   const [isPulling, setIsPulling] = useState(false);
+  
+  // Article view state
+  const [articleViewOpen, setArticleViewOpen] = useState(false);
+  const [selectedArticle, setSelectedArticle] = useState<NewsArticle | null>(null);
+  const [browseView, setBrowseView] = useState(false);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const touchStartY = useRef(0);
   const PULL_THRESHOLD = 80;
+  
+  // Race condition prevention
+  const loadingRequestId = useRef(0);
+  const activeRequestId = useRef(0);
+  const newsRef = useRef<NewsArticle[]>([]);
+  
+  // Keep newsRef in sync with news state
+  useEffect(() => {
+    newsRef.current = news;
+  }, [news]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ category, region }));
@@ -110,6 +130,9 @@ export default function App() {
   const pullRotation = useTransform(pullY, [0, PULL_THRESHOLD], [0, 360]);
 
   const loadNews = useCallback(async (isRefresh = false) => {
+    // Generate unique request ID to prevent race conditions
+    const requestId = ++loadingRequestId.current;
+    
     if (isRefresh) setRefreshing(true);
     setError(null);
     const cacheKey = `${NEWS_CACHE_KEY}_${category}_${region}`;
@@ -126,6 +149,12 @@ export default function App() {
     try {
       const data = await fetchLatestTechNews(category, region);
       
+      // Check if this request is still the latest one
+      if (requestId !== loadingRequestId.current) {
+        // A newer request has been made, discard this result
+        return;
+      }
+      
       if (data.length > 0) {
         setNews(data);
         setPendingNews([]);
@@ -134,11 +163,17 @@ export default function App() {
         setError("No intelligence found for this selection.");
       }
     } catch (err: any) {
-      console.error("Failed to load news:", err);
+      // Only update error if this is still the latest request
+      if (requestId !== loadingRequestId.current) return;
+      
+      logger.error("Failed to load news:", err);
       if (!cached && !isRefresh) {
         setError(err.message || "Failed to connect to the intelligence network. Please try again.");
       }
     } finally {
+      // Only update loading state if this is still the latest request
+      if (requestId !== loadingRequestId.current) return;
+      
       setLoading(false);
       setRefreshing(false);
       if (!isRefresh) setActivePostIndex(0);
@@ -263,12 +298,32 @@ export default function App() {
 
   const handleLoadMore = useCallback(async () => {
     if (loadingMore || loading) return;
+    
+    // Use ref to get latest news value to avoid stale closure
+    const currentNews = newsRef.current;
+    if (currentNews.length === 0) return;
+    
+    // Generate unique request ID
+    const requestId = ++activeRequestId.current;
+    
     setLoadingMore(true);
-    const existingIds = news.map(n => n.id);
-    const moreNews = await fetchLatestTechNews(category, region, existingIds);
-    setNews(prev => [...prev, ...moreNews]);
-    setLoadingMore(false);
-  }, [category, region, news, loadingMore, loading]);
+    const existingIds = currentNews.map(n => n.id);
+    
+    try {
+      const moreNews = await fetchLatestTechNews(category, region, existingIds);
+      
+      // Check if this request is still valid
+      if (requestId !== activeRequestId.current) return;
+      
+      setNews(prev => [...prev, ...moreNews]);
+    } catch (err) {
+      logger.error("Failed to load more news:", err);
+    } finally {
+      if (requestId === activeRequestId.current) {
+        setLoadingMore(false);
+      }
+    }
+  }, [category, region, loadingMore, loading]);
 
   const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
     const container = e.currentTarget;
@@ -300,6 +355,16 @@ export default function App() {
     if (containerRef.current) {
       containerRef.current.scrollTop = 0;
     }
+  }, []);
+  
+  const handleOpenArticle = useCallback((article: NewsArticle) => {
+    setSelectedArticle(article);
+    setArticleViewOpen(true);
+  }, []);
+  
+  const handleCloseArticleView = useCallback(() => {
+    setArticleViewOpen(false);
+    setSelectedArticle(null);
   }, []);
 
   const memoizedNews = useMemo(() => news, [news]);
@@ -336,13 +401,20 @@ export default function App() {
     return <Onboarding />;
   }
 
+  // Loading fallback for lazy components
+  const LoadingFallback = (
+    <div className="h-full flex items-center justify-center bg-black">
+      <Loader2 className="animate-spin text-white/40" size={32} />
+    </div>
+  );
+
   return (
-    <div className="fixed inset-0 bg-black flex flex-col lg:flex-row overflow-hidden">
+    <div className="fixed inset-0 bg-black flex flex-col lg:flex-row overflow-hidden" role="application" aria-label="TechPulse Intelligence">
       {/* Top Bar (Mobile) / Header */}
       <div className="absolute top-0 left-0 right-0 z-40 flex items-center justify-between px-6 py-6 bg-gradient-to-b from-black/80 to-transparent pointer-events-none">
           <div className="flex items-center gap-3 pointer-events-auto">
-            <span className="font-sans font-black text-2xl text-white tracking-tighter uppercase italic">Pulse</span>
-            <div className="px-2 py-0.5 bg-red-500 rounded-sm flex items-center gap-1">
+            <span className="font-sans font-black text-2xl text-white tracking-tighter uppercase italic" role="heading" aria-level={1}>Pulse</span>
+            <div className="px-2 py-0.5 bg-red-500 rounded-sm flex items-center gap-1" aria-live="polite">
               <span className="font-sans text-[8px] font-black uppercase tracking-tighter text-white">Live</span>
             </div>
           </div>
@@ -351,8 +423,10 @@ export default function App() {
           <button 
             onClick={() => setShowFilters(!showFilters)}
             className="p-2.5 bg-white/10 backdrop-blur-xl rounded-full text-white hover:bg-white/20 transition-all active:scale-90"
+            aria-label="Open filters"
+            aria-expanded={showFilters}
           >
-            <Filter size={20} />
+            <Filter size={20} aria-hidden="true" />
           </button>
         </div>
       </div>
@@ -365,6 +439,9 @@ export default function App() {
         onTouchMove={handleTouchMove}
         onTouchEnd={handleTouchEnd}
         className="flex-1 snap-container no-scrollbar pb-20 lg:pb-0 relative"
+        role="main"
+        aria-label="News feed"
+        tabIndex={0}
       >
         {/* Pull to Refresh Indicator */}
         <motion.div 
@@ -426,7 +503,7 @@ export default function App() {
             </button>
           </div>
         ) : memoizedNews.length > 0 ? (
-          <>
+          <Suspense fallback={LoadingFallback}>
             {memoizedNews.map((article, index) => (
               <FeedPost 
                 key={`${article.id}-${index}`} 
@@ -434,14 +511,10 @@ export default function App() {
                 isActive={index === activePostIndex} 
                 isNextPost={index === activePostIndex + 1}
                 onSelectArticle={handleSelectArticle}
+                onOpenArticle={handleOpenArticle}
               />
             ))}
-            {loadingMore && (
-              <div className="h-screen flex items-center justify-center bg-black text-white">
-                <Loader2 className="animate-spin" size={32} />
-              </div>
-            )}
-          </>
+          </Suspense>
         ) : (
           <div className="h-full flex flex-col items-center justify-center text-white p-8 text-center">
             <Sparkles size={48} className="text-white/20 mb-4" />
@@ -514,47 +587,70 @@ export default function App() {
       </AnimatePresence>
 
       {/* Bottom Navbar */}
-      <div className="fixed bottom-0 left-0 right-0 z-50 bg-black/80 backdrop-blur-xl border-t border-white/10 px-6 py-3 flex items-center justify-between lg:hidden">
+      <nav className="fixed bottom-0 left-0 right-0 z-50 bg-black/80 backdrop-blur-xl border-t border-white/10 px-4 py-3 flex items-center justify-between lg:hidden" aria-label="Main navigation">
         <button 
           onClick={() => {
             setActiveTab('home');
             setShowSearch(false);
             setShowFilters(false);
+            setBrowseView(false);
           }}
           className={cn(
             "flex flex-col items-center gap-1 transition-all",
-            activeTab === 'home' && !showSearch ? "text-white scale-110" : "text-white/40 hover:text-white/60"
+            activeTab === 'home' && !showSearch && !browseView ? "text-white scale-110" : "text-white/40 hover:text-white/60"
           )}
+          aria-label="Home"
+          aria-current={activeTab === 'home' ? 'page' : undefined}
         >
-          <Home size={24} />
+          <Home size={22} aria-hidden="true" />
           <span className="text-[8px] font-mono uppercase tracking-widest">Home</span>
+        </button>
+
+        <button 
+          onClick={() => setBrowseView(!browseView)}
+          className={cn(
+            "flex flex-col items-center gap-1 transition-all",
+            browseView ? "text-white scale-110" : "text-white/40 hover:text-white/60"
+          )}
+          aria-label="Browse articles"
+          aria-expanded={browseView}
+        >
+          <LayoutGrid size={22} aria-hidden="true" />
+          <span className="text-[8px] font-mono uppercase tracking-widest">Browse</span>
         </button>
 
         <button 
           onClick={() => {
             setActiveTab('discover');
             setShowSearch(true);
+            setBrowseView(false);
           }}
           className={cn(
             "flex flex-col items-center gap-1 transition-all",
             showSearch ? "text-white scale-110" : "text-white/40 hover:text-white/60"
           )}
+          aria-label="Search"
         >
-          <Search size={24} />
+          <Search size={22} aria-hidden="true" />
           <span className="text-[8px] font-mono uppercase tracking-widest">Search</span>
         </button>
 
         <button 
-          onClick={() => setActiveTab('profile')}
+          onClick={() => {
+            setActiveTab('profile');
+            setBrowseView(false);
+          }}
           className={cn(
             "flex flex-col items-center gap-1 transition-all",
             activeTab === 'profile' ? "text-white scale-110" : "text-white/40 hover:text-white/60"
           )}
+          aria-label="History"
+          aria-current={activeTab === 'profile' ? 'page' : undefined}
         >
-          <User size={24} />
+          <User size={22} aria-hidden="true" />
           <span className="text-[8px] font-mono uppercase tracking-widest">History</span>
         </button>
-      </div>
+      </nav>
 
       {/* History/Profile Overlay */}
       <AnimatePresence>
@@ -723,6 +819,79 @@ export default function App() {
                   Search
                 </button>
               </form>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Article View Overlay */}
+      <AnimatePresence>
+        {articleViewOpen && selectedArticle && (
+          <motion.div
+            initial={{ opacity: 0, x: '100%' }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: '100%' }}
+            transition={{ type: 'spring', damping: 25, stiffness: 200 }}
+            className="absolute inset-0 z-[90] bg-[#f5f5f5] overflow-y-auto"
+          >
+            <Suspense fallback={<div className="p-8 text-center"><Loader2 className="animate-spin" /></div>}>
+              <ArticleView 
+                article={selectedArticle} 
+                onBack={handleCloseArticleView}
+              />
+            </Suspense>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Browse View (News Card Grid) */}
+      <AnimatePresence>
+        {browseView && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 20 }}
+            className="absolute inset-0 z-[85] bg-black overflow-y-auto"
+          >
+            <div className="min-h-full p-6 pt-24">
+              <div className="max-w-6xl mx-auto">
+                <div className="flex items-center justify-between mb-8">
+                  <div>
+                    <h2 className="font-sans font-black text-2xl text-white uppercase tracking-tighter">Browse Intelligence</h2>
+                    <p className="text-white/40 font-mono text-[10px] uppercase tracking-widest mt-1">Explore all articles in a grid view</p>
+                  </div>
+                  <button 
+                    onClick={() => setBrowseView(false)}
+                    className="p-3 bg-white/5 rounded-full text-white/60 hover:text-white hover:bg-white/10 transition-all active:scale-90"
+                  >
+                    <X size={24} />
+                  </button>
+                </div>
+                {loading ? (
+                  <div className="flex items-center justify-center py-20">
+                    <Loader2 className="animate-spin text-white/40" size={48} />
+                  </div>
+                ) : news.length > 0 ? (
+                  <Suspense fallback={LoadingFallback}>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                      {news.map((article) => (
+                        <NewsCard 
+                          key={article.id} 
+                          article={article} 
+                          onClick={() => {
+                            setBrowseView(false);
+                            handleOpenArticle(article);
+                          }}
+                        />
+                      ))}
+                    </div>
+                  </Suspense>
+                ) : (
+                  <div className="text-center py-20 text-white/40 font-mono text-sm">
+                    No articles found for this selection.
+                  </div>
+                )}
+              </div>
             </div>
           </motion.div>
         )}

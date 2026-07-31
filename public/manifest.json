@@ -8,8 +8,8 @@
   "id": "/?source=pwa_pulse",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#000000",
-  "theme_color": "#000000",
+  "background_color": "#0F172A",
+  "theme_color": "#0F172A",
   "scope": "/",
   "share_target": {
     "action": "/",
@@ -23,28 +23,10 @@
   "categories": ["news", "productivity", "education"],
   "icons": [
     {
-      "src": "https://picsum.photos/seed/tp_logo_192/192/192",
-      "sizes": "192x192",
-      "type": "image/png",
+      "src": "/icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
       "purpose": "any"
-    },
-    {
-      "src": "https://picsum.photos/seed/tp_logo_512/512/512",
-      "sizes": "512x512",
-      "type": "image/png",
-      "purpose": "any"
-    },
-    {
-      "src": "https://picsum.photos/seed/tp_maskable_192/192/192",
-      "sizes": "192x192",
-      "type": "image/png",
-      "purpose": "maskable"
-    },
-    {
-      "src": "https://picsum.photos/seed/tp_maskable_512/512/512",
-      "sizes": "512x512",
-      "type": "image/png",
-      "purpose": "maskable"
     }
   ],
   "shortcuts": [
@@ -52,22 +34,13 @@
       "name": "Latest Intelligence",
       "short_name": "Latest",
       "url": "/?shortcut=latest",
-      "icons": [{ "src": "https://picsum.photos/seed/tp_news/96/96", "sizes": "96x96" }]
+      "icons": [{ "src": "/icons/icon.svg", "sizes": "any" }]
     },
     {
       "name": "Global Search",
       "short_name": "Search",
       "url": "/?search=true",
-      "icons": [{ "src": "https://picsum.photos/seed/tp_search/96/96", "sizes": "96x96" }]
-    }
-  ],
-  "screenshots": [
-    {
-      "src": "https://picsum.photos/seed/tp_screen1/1080/1920",
-      "sizes": "1080x1920",
-      "type": "image/png",
-      "form_factor": "narrow",
-      "label": "Feed View"
+      "icons": [{ "src": "/icons/icon.svg", "sizes": "any" }]
     }
   ]
 }

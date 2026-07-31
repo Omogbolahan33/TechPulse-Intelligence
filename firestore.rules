@@ -1,43 +1,23 @@
 // ===============================================================
-// Assumed Data Model
+// Firestore Security Rules — TechPulse Intelligence
 // ===============================================================
 //
-// Collection: /articles/{articleId}/comments
-// Document ID: {commentId}
-// Fields:
-//   - articleId: string (required) - The ID of the article
-//   - userId: string (required, immutable) - The UID of the author
-//   - userName: string (required) - Display name of the author
-//   - userPhoto: string (optional) - Photo URL of the author
-//   - text: string (required, max 500 chars) - The comment text
-//   - createdAt: timestamp (required, immutable) - Creation time
+// Data Model:
 //
 // Collection: /news/{articleId}
-// Document ID: {articleId}
-// Fields:
-//   - id: string (required)
-//   - title: string (required)
-//   - summary: string (required)
-//   - category: string (required)
-//   - timestamp: string (required)
-//   - source: string (required)
-//   - imageUrl: string (required)
-//   - region: string (required)
-//   - fetchedAt: string (required)
+//   - Public read, authenticated write (server prefetch via service account)
 //
 // Collection: /synthesis/{articleId}
-// Document ID: {articleId}
-// Fields:
-//   - articleId: string (required)
-//   - url: string (required)
-//   - source: string (required)
-//   - fullContent: string (required)
-//   - keyTakeaways: list (required)
-//   - quiz: list (required)
-//   - flashcards: list (required)
-//   - videoScript: string (required)
-//   - podcastScript: string (required)
-//   - synthesizedAt: string (required)
+//   - Public read, authenticated write (server prefetch via service account)
+//
+// Collection: /articles/{articleId}/comments/{commentId}
+//   - Public read, authenticated create, owner delete
+//
+// Collection: /likes/{likeId}
+//   - Public read, authenticated create/delete own
+//
+// Collection: /bookmarks/{bookmarkId}
+//   - Owner read/write only
 //
 // ===============================================================
 
@@ -54,6 +34,14 @@ service cloud.firestore {
       return isAuthenticated() && request.auth.uid == userId;
     }
 
+    // Check if user has admin role (stored in custom claims or admin collection)
+    function isAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.admin == true ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
     function isValidComment(data) {
       return data.keys().hasAll(['articleId', 'userId', 'userName', 'text', 'createdAt']) &&
              data.articleId is string &&
@@ -63,21 +51,44 @@ service cloud.firestore {
              data.createdAt is timestamp;
     }
 
+    function isValidNewsArticle(data) {
+      return data.keys().hasAll(['id', 'title', 'summary', 'category', 'timestamp', 'source', 'imageUrl', 'url']) &&
+             data.id is string &&
+             data.title is string && data.title.size() > 0 &&
+             data.summary is string && data.summary.size() > 0 &&
+             data.category is string &&
+             data.source is string &&
+             data.url is string &&
+             data.imageUrl is string;
+    }
+
+    function isValidSynthesis(data) {
+      return data.keys().hasAll(['articleId', 'fullContent', 'keyTakeaways']) &&
+             data.articleId is string &&
+             data.fullContent is string;
+    }
+
     // News collection
+    // Public read for all users
+    // Write restricted to authenticated admin users or service accounts
     match /news/{articleId} {
       allow read: if true;
-      // Allow write for prefetching (In production, this should be restricted to a service account or admin)
-      allow write: if true;
+      allow create: if isAdmin() && isValidNewsArticle(request.resource.data);
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
     }
 
     // Synthesis collection
+    // Public read for all users
+    // Write restricted to authenticated admin users or service accounts
     match /synthesis/{articleId} {
       allow read: if true;
-      // Allow write for pre-synthesis (In production, this should be restricted)
-      allow write: if true;
+      allow create: if isAdmin() && isValidSynthesis(request.resource.data);
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
     }
 
-    // Articles collection (implicit read for comments)
+    // Articles collection (for comments)
     match /articles/{articleId} {
       allow read: if true;
 
@@ -91,7 +102,7 @@ service cloud.firestore {
         // Only the owner can delete their comment
         allow delete: if isAuthenticated() && isOwner(resource.data.userId);
 
-        // Comments are immutable for now (no updates)
+        // Comments are immutable (no updates)
         allow update: if false;
       }
     }
@@ -111,9 +122,7 @@ service cloud.firestore {
 
     // Bookmarks collection
     match /bookmarks/{bookmarkId} {
-      // Only the owner can read their bookmarks. 
-      // We allow read if the document doesn't exist (resource == null) 
-      // or if the authenticated user is the owner.
+      // Only the owner can read their bookmarks
       allow read: if isAuthenticated() && (resource == null || isOwner(resource.data.userId));
       
       // Only authenticated users can bookmark for themselves
@@ -122,6 +131,12 @@ service cloud.firestore {
                       bookmarkId == request.auth.uid + "_" + request.resource.data.articleId;
       
       allow delete: if isAuthenticated() && isOwner(resource.data.userId);
+    }
+
+    // Admins collection (for admin role verification)
+    match /admins/{userId} {
+      allow read: if isAuthenticated() && request.auth.uid == userId;
+      allow write: if false; // Only writable via Admin SDK
     }
 
     // Default deny

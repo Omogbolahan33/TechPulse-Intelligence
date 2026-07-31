@@ -8,14 +8,14 @@ interface PersonaState {
 }
 
 export const usePersonaStore = create<PersonaState>((set) => ({
-  userPersona: localStorage.getItem('enigma_user_persona'),
-  hasSeenOnboarding: localStorage.getItem('enigma_onboarding_complete') === 'true',
+  userPersona: localStorage.getItem('techpulse_user_persona'),
+  hasSeenOnboarding: localStorage.getItem('techpulse_onboarding_complete') === 'true',
   setUserPersona: (persona: string) => {
-    localStorage.setItem('enigma_user_persona', persona);
+    localStorage.setItem('techpulse_user_persona', persona);
     set({ userPersona: persona });
   },
   completeOnboarding: () => {
-    localStorage.setItem('enigma_onboarding_complete', 'true');
+    localStorage.setItem('techpulse_onboarding_complete', 'true');
     set({ hasSeenOnboarding: true });
   }
 }));

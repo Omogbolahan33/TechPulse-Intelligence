@@ -23,6 +23,7 @@ import { Send, Trash2, User, LogIn, Loader2, Heart } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { formatDistanceToNow } from 'date-fns';
 import { cn } from '../lib/utils';
+import { sanitizeText } from '../lib/sanitize';
 
 interface CommentsSectionProps {
   articleId: string;
@@ -97,7 +98,7 @@ const CommentItem: React.FC<{ comment: Comment; user: any; onDelete: (id: string
               {comment.createdAt?.toDate ? formatDistanceToNow(comment.createdAt.toDate(), { addSuffix: true }) : 'just now'}
             </span>
           </div>
-          <p className="text-sm text-white/90 break-words leading-snug">{comment.text}</p>
+          <p className="text-sm text-white/90 break-words leading-snug">{sanitizeText(comment.text)}</p>
           <div className="flex items-center gap-4 mt-2">
             <button className="flex items-center gap-1 text-[10px] font-bold text-white/40 hover:text-white/60 transition-colors">
               Reply

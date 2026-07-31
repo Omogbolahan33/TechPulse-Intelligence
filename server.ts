@@ -8,16 +8,169 @@ import { createServer as createViteServer } from "vite";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
-import { fetchLatestTechNews, getArticleDetails, NewsArticle, ArticleContent } from "./src/services/newsService";
+import { getArticleDetails, NewsArticle, ArticleContent } from "./src/services/newsService";
 import { db } from "./src/firebase";
-import { unifiedAI } from "./src/services/aiProvider";
+import { serverAI } from "./src/server/aiProvider";
+import aiRoutes from "./src/server/aiRoutes";
 import { doc, setDoc, getDoc, collection, getDocs, query, where, limit, orderBy, deleteDoc } from "firebase/firestore";
+import { Type } from "@google/genai";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const CATEGORIES = ["All", "Tech", "Jobs", "Hiring", "Remote Work", "Career Advice"];
 const REGIONS = ["Global", "USA", "Europe", "Asia", "Africa", "LatAm", "Nigeria"];
+
+// Server-side AI news fetcher (uses serverAI directly, no HTTP calls)
+async function fetchLatestTechNewsServer(
+  category: string = "All",
+  region: string = "Global",
+  existingIds: string[] = []
+): Promise<NewsArticle[]> {
+  try {
+    const now = new Date();
+    
+    // 1. Try Firestore first
+    const newsRef = collection(db, "news");
+    let q = query(
+      newsRef,
+      where("category", "==", category),
+      where("region", "==", region),
+      orderBy("timestamp", "desc"),
+      limit(12)
+    );
+
+    if (category === "All") {
+      q = query(
+        newsRef,
+        where("region", "==", region),
+        orderBy("timestamp", "desc"),
+        limit(12)
+      );
+    }
+
+    const snapshot = await getDocs(q);
+    const fsNews: NewsArticle[] = [];
+    snapshot.forEach((doc) => {
+      const data = doc.data() as NewsArticle;
+      if (!existingIds.includes(data.id)) {
+        fsNews.push(data);
+      }
+    });
+
+    // Check freshness
+    const latest = fsNews[0];
+    const isFresh = latest && (now.getTime() - new Date(latest.timestamp).getTime() < 2 * 60 * 60 * 1000);
+    
+    if (fsNews.length >= 5 && isFresh) {
+      return fsNews;
+    }
+
+    // 2. If not fresh or not enough, use AI to fetch fresh news
+    if (fsNews.length > 0 && isFresh) {
+      return fsNews;
+    }
+
+    console.log(`[Server] Cache miss for ${category}/${region}. Fetching from AI...`);
+    
+    const today = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+    const categoryPrompt = category === "All" ? "technology, startups, and innovation" : category;
+    const regionPrompt = region === "Global" ? "globally" : `in ${region}`;
+
+    const prompt = `
+      Today is ${today}. 
+      Use Google Search to find exactly 8 HIGH-IMPACT, BREAKING news stories published within the LAST 24 HOURS specifically about ${categoryPrompt} ${regionPrompt}.
+      
+      REQUIREMENTS:
+      1. ARTICLES MUST BE RECENT: Only include news published since yesterday.
+      2. VERBATIM TITLES: Use the actual original headline as the 'title'.
+      3. ACCURATE TIMESTAMPS: Use the exact publication time in ISO 8601 format.
+      4. REAL SOURCES: Use the official name of the publication (e.g., 'Reuters', 'TechCrunch').
+      5. DIVERSITY: Avoid duplicate stories or different sources for the same story.
+      
+      Return a JSON array of objects with these fields:
+      - title: string (the original headline)
+      - summary: string (2-3 sentences of core facts)
+      - category: string (one of: AI, Software, Hardware, Startups, Cloud, Jobs)
+      - timestamp: string (ISO 8601 publication date)
+      - source: string (publisher name)
+      - imageUrl: string (valid direct HTTPS link to article image)
+      - url: string (valid direct HTTPS link to the article)
+    `;
+
+    const aiResponse = await serverAI.generateContent({
+      contents: prompt,
+      config: {
+        tools: [{ googleSearch: {} }],
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              title: { type: Type.STRING },
+              summary: { type: Type.STRING },
+              category: { type: Type.STRING },
+              timestamp: { type: Type.STRING, format: "date-time" },
+              source: { type: Type.STRING },
+              imageUrl: { type: Type.STRING },
+              url: { type: Type.STRING },
+            },
+            required: ["title", "summary", "category", "timestamp", "source", "imageUrl", "url"],
+          },
+        },
+      },
+    });
+
+    let rawNews: any = [];
+    try {
+      const text = aiResponse.text || "[]";
+      const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/) || [null, text];
+      const jsonContent = (jsonMatch[1] || text).trim();
+      rawNews = JSON.parse(jsonContent);
+    } catch (e) {
+      console.error("[Server] AI News JSON Parsing failed:", e);
+      rawNews = [];
+    }
+
+    // Process news articles
+    const news: NewsArticle[] = rawNews.map((item: any) => {
+      const absoluteUrl = item.url?.startsWith('http') ? item.url : `https://${item.url}`;
+      const imageUrl = item.imageUrl?.startsWith('http') ? item.imageUrl : `https://${item.imageUrl}`;
+      
+      // Generate stable ID from URL
+      let hash = 0;
+      for (let i = 0; i < absoluteUrl.length; i++) {
+        hash = ((hash << 5) - hash) + absoluteUrl.charCodeAt(i);
+        hash |= 0;
+      }
+      const tail = absoluteUrl.slice(-30).replace(/[^a-zA-Z0-9]/g, '');
+      const id = `${Math.abs(hash).toString(36)}_${tail}`;
+      
+      return {
+        ...item,
+        id,
+        url: absoluteUrl,
+        imageUrl,
+        region,
+      };
+    });
+
+    // Save to Firestore in background
+    news.forEach(article => {
+      const articleRef = doc(db, "news", article.id);
+      setDoc(articleRef, {
+        ...article,
+        fetchedAt: new Date().toISOString()
+      }, { merge: true }).catch(err => console.error("[Server] Error caching article:", err));
+    });
+
+    return news.length > 0 ? news : fsNews;
+  } catch (error) {
+    console.error("[Server] Error fetching news:", error);
+    return [];
+  }
+}
 
 // Priority categories for more frequent/deeper prefetching
 const PRIORITY_CATEGORIES = ["All", "Tech", "Jobs"];
@@ -132,7 +285,7 @@ async function prefetchNews() {
       }
 
       console.log(`[Pulse] Scheduled fetch: ${category} in ${region}`);
-      const news = await fetchLatestTechNews(category, region, [], false, true);
+      const news = await fetchLatestTechNewsServer(category, region, []);
       
       fetchHistory.set(cacheKey, Date.now());
       diagnostis.fetchHistory[cacheKey] = new Date().toISOString();
@@ -171,7 +324,7 @@ async function prefetchNews() {
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = parseInt(process.env.PORT || '3000', 10);
 
   app.get("/api/admin/diagnostics", (req, res) => {
     res.json({
@@ -193,6 +346,9 @@ async function startServer() {
   app.get("/api/health", (req, res) => res.json({ status: "ok" }));
   app.get("/ping", (req, res) => res.send("pong"));
 
+  // AI API Routes (server-side proxy for all AI operations)
+  app.use("/api/ai", express.json({ limit: '10mb' }), aiRoutes);
+
   app.get("/api/news", async (req, res) => {
     const start = Date.now();
     const { category = "All", region = "Global" } = req.query;
@@ -202,7 +358,7 @@ async function startServer() {
     activeCombinations.set(`${category as string}|${region as string}`, Date.now());
 
     const cached = apiCache.get(cacheKey);
-    res.setHeader("X-Intelligence-Node", unifiedAI.getActiveProviderName());
+    res.setHeader("X-Intelligence-Node", serverAI.getActiveProviderName());
     res.setHeader("X-Diagnostic-Portal", "/api/admin/diagnostics");
 
     if (cached && (Date.now() - cached.timestamp < CACHE_TTL)) {
@@ -241,8 +397,8 @@ async function startServer() {
 
       if (isStale) {
         console.log(`Data for ${category}/${region} is stale or missing. Triggering background fetch...`);
-        // Use forceRefresh = true to guarantee we bypass the SWR protection in fetchLatestTechNews
-        const fetchPromise = fetchLatestTechNews(category as string, region as string, [], false, true);
+        // Use server-side fetcher
+        const fetchPromise = fetchLatestTechNewsServer(category as string, region as string, []);
         
         fetchPromise.then(freshNews => {
           if (freshNews.length > 0) {
@@ -269,12 +425,33 @@ async function startServer() {
     }
   });
 
+  // Chat endpoint is now handled by /api/ai/chat in aiRoutes.ts
+  // Legacy endpoint redirects to new location
   app.post("/api/chat", express.json(), async (req, res) => {
     const { articleTitle, context, message, history } = req.body;
     try {
-      const { chatWithAI } = await import("./src/services/newsService");
-      const response = await chatWithAI(articleTitle, context, message, history);
-      res.json({ response });
+      const prompt = `
+        You are an elite career and technology consultant for the Enigma Engine.
+        The user is reading about: "${articleTitle}"
+        Context related to their specific question: "${context}"
+        
+        User's question: "${message}"
+        
+        Conversation History:
+        ${history.map((h: any) => `${h.role === 'user' ? 'User' : 'Consultant'}: ${h.text}`).join('\n')}
+        
+        Provide a sharp, strategic, and practical answer. Keep it professional but engaging, with a "premium intelligence" tone.
+      `;
+
+      const result = await serverAI.generateContent({
+        contents: prompt,
+        config: {
+          tools: [{ googleSearch: {} }],
+          maxOutputTokens: 1000,
+        },
+      });
+
+      res.json({ response: result.text || "I'm sorry, I couldn't process that request at the moment." });
     } catch (error) {
       console.error("Chat API error:", error);
       res.status(500).json({ error: "Intelligence network busy" });

@@ -198,7 +198,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({ articleTitle, context, isO
               </button>
             </div>
             <p className="mt-4 text-[9px] font-mono text-gray-400 uppercase tracking-widest text-center">
-              Powered by Enigma Intelligence
+              Powered by TechPulse Intelligence
             </p>
           </div>
         </motion.div>

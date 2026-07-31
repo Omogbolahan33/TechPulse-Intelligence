@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">TechPulse Intelligence</string>
+    <string name="title_activity_main">TechPulse Intelligence</string>
+    <string name="package_name">com.techpulse.intelligence</string>
+    <string name="custom_url_scheme">com.techpulse.intelligence</string>
+</resources>

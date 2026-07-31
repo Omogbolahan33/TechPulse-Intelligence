@@ -68,7 +68,7 @@ export const LazyImage: React.FC<LazyImageProps> = ({
       {currentSrc && (
         <motion.img
           src={currentSrc}
-          alt={alt}
+          alt={alt || 'Article image'}
           initial={{ opacity: 0, scale: 1.05 }}
           animate={{ 
             opacity: isLoaded ? 1 : 0,
@@ -77,6 +77,8 @@ export const LazyImage: React.FC<LazyImageProps> = ({
           transition={{ duration: 0.6, ease: "easeOut" }}
           className={cn("w-full h-full object-cover", className)}
           referrerPolicy={referrerPolicy}
+          loading="lazy"
+          role={alt ? 'img' : 'presentation'}
         />
       )}
     </div>

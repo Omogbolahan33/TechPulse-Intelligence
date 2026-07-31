@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { formatDistanceToNow, parseISO } from 'date-fns';
-import { PlusSquare, ExternalLink, ChevronDown, Heart, MessageCircle, Share2, Bookmark, BrainCircuit, PlayCircle, Layers, ChevronUp, AlertTriangle, Loader2 } from 'lucide-react';
+import { PlusSquare, ExternalLink, Heart, MessageCircle, Share2, Bookmark, AlertTriangle, Loader2, BookOpen } from 'lucide-react';
 import { NewsArticle, ArticleContent, getArticleDetails, getRelatedArticles, StrategicImplication } from '../services/newsService';
 import { cn } from '../lib/utils';
 import { 
@@ -20,9 +20,11 @@ import {
   googleProvider
 } from '../firebase';
 import { LazyImage } from './LazyImage';
+import { ImagePlaceholder } from './ImagePlaceholder';
 import { Quiz } from './Quiz';
 import { ProsCons } from './ProsCons';
 import { MediaSection } from './MediaSection';
+import { Flashcards } from './Flashcards';
 import { CommentsSection } from './CommentsSection';
 import { ChatPanel } from './ChatPanel';
 import ReactMarkdown from 'react-markdown';
@@ -33,9 +35,10 @@ interface FeedPostProps {
   isActive: boolean;
   isNextPost: boolean;
   onSelectArticle: (article: NewsArticle) => void;
+  onOpenArticle?: (article: NewsArticle) => void;
 }
 
-export const FeedPost = React.memo<FeedPostProps>(({ article, isActive, isNextPost, onSelectArticle }) => {
+export const FeedPost = React.memo<FeedPostProps>(({ article, isActive, isNextPost, onSelectArticle, onOpenArticle }) => {
   const { userPersona } = usePersonaStore();
   const [isLiked, setIsLiked] = useState(false);
   const [isBookmarked, setIsBookmarked] = useState(false);
@@ -49,21 +52,25 @@ export const FeedPost = React.memo<FeedPostProps>(({ article, isActive, isNextPo
     const likesRef = collection(db, 'likes');
     const q = query(likesRef, where('targetId', '==', article.id));
     
-    const unsubscribe = onSnapshot(q, (snapshot) => {
+    const unsubscribeLikes = onSnapshot(q, (snapshot) => {
       setLikesCount(snapshot.size);
     });
 
     // Check if current user liked/bookmarked it
+    let isMounted = true;
     const checkUserStatus = async () => {
       if (auth.currentUser) {
         const userLikeRef = doc(db, 'likes', `${auth.currentUser.uid}_${article.id}`);
         const likeSnap = await getDoc(userLikeRef);
-        setIsLiked(likeSnap.exists());
-
+        
         const userBookmarkRef = doc(db, 'bookmarks', `${auth.currentUser.uid}_${article.id}`);
         const bookmarkSnap = await getDoc(userBookmarkRef);
-        setIsBookmarked(bookmarkSnap.exists());
-      } else {
+        
+        if (isMounted) {
+          setIsLiked(likeSnap.exists());
+          setIsBookmarked(bookmarkSnap.exists());
+        }
+      } else if (isMounted) {
         setIsLiked(false);
         setIsBookmarked(false);
       }
@@ -71,13 +78,14 @@ export const FeedPost = React.memo<FeedPostProps>(({ article, isActive, isNextPo
 
     checkUserStatus();
 
-    // Also listen for auth changes to re-check
+    // Listen for auth changes to re-check
     const unsubscribeAuth = auth.onAuthStateChanged(() => {
       checkUserStatus();
     });
 
     return () => {
-      unsubscribe();
+      isMounted = false;
+      unsubscribeLikes();
       unsubscribeAuth();
     };
   }, [article.id]);
@@ -179,7 +187,7 @@ export const FeedPost = React.memo<FeedPostProps>(({ article, isActive, isNextPo
   const [relatedArticles, setRelatedArticles] = useState<NewsArticle[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'digest' | 'quiz' | 'analysis' | 'media' | 'comments'>('digest');
+  const [activeTab, setActiveTab] = useState<'digest' | 'quiz' | 'analysis' | 'media' | 'flashcards' | 'comments'>('digest');
   const [chatOpen, setChatOpen] = useState(false);
   const [chatContext, setChatContext] = useState('');
 
@@ -230,7 +238,7 @@ export const FeedPost = React.memo<FeedPostProps>(({ article, isActive, isNextPo
     }
   }, [showDigest, isNextPost, article.title, article.id, article.category, details, loading]);
 
-  const bgImage = article.imageUrl || `https://picsum.photos/seed/${article.category.toLowerCase()}-${article.id.slice(0,4)}/1080/1920?blur=2`;
+  const bgImage = article.imageUrl || null;
 
   const renderImplicationList = (items: (string | StrategicImplication)[], type: 'gain' | 'loss') => {
     const isGain = type === 'gain';
@@ -321,11 +329,15 @@ export const FeedPost = React.memo<FeedPostProps>(({ article, isActive, isNextPo
         className="absolute inset-0 z-0 cursor-pointer"
         onClick={() => setShowDigest(true)}
       >
-        <LazyImage 
-          src={bgImage} 
-          alt={article.title}
-          className="w-full h-full opacity-60"
-        />
+        {bgImage ? (
+          <LazyImage 
+            src={bgImage} 
+            alt={article.title}
+            className="w-full h-full opacity-60"
+          />
+        ) : (
+          <ImagePlaceholder category={article.category} className="opacity-60" />
+        )}
         <div className="absolute inset-0 bg-gradient-to-b from-black/40 via-transparent to-black/80" />
       </div>
 
@@ -446,7 +458,13 @@ export const FeedPost = React.memo<FeedPostProps>(({ article, isActive, isNextPo
           </span>
         </div>
         
-        <h2 className="text-xl font-bold text-white mb-2 leading-tight tracking-tight">
+        <h2 
+          className="text-xl font-bold text-white mb-2 leading-tight tracking-tight cursor-pointer hover:text-red-400 transition-colors"
+          onClick={(e) => {
+            e.stopPropagation();
+            onOpenArticle?.(article);
+          }}
+        >
           {article.title}
         </h2>
         
@@ -462,17 +480,31 @@ export const FeedPost = React.memo<FeedPostProps>(({ article, isActive, isNextPo
             </span>
           </div>
           
-          {article.url && (
-            <a 
-              href={article.url} 
-              target="_blank" 
-              rel="noopener noreferrer"
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-white/10 hover:bg-white/20 rounded-full transition-colors border border-white/5"
-            >
-              <span className="text-[10px] font-bold text-white/80 uppercase tracking-wider">Source</span>
-              <ExternalLink size={10} className="text-white/60" />
-            </a>
-          )}
+          <div className="flex items-center gap-2">
+            {onOpenArticle && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpenArticle(article);
+                }}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-red-500/20 hover:bg-red-500/30 rounded-full transition-colors border border-red-500/30"
+              >
+                <BookOpen size={10} className="text-red-400" />
+                <span className="text-[10px] font-bold text-red-400 uppercase tracking-wider">Read</span>
+              </button>
+            )}
+            {article.url && (
+              <a 
+                href={article.url} 
+                target="_blank" 
+                rel="noopener noreferrer"
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-white/10 hover:bg-white/20 rounded-full transition-colors border border-white/5"
+              >
+                <span className="text-[10px] font-bold text-white/80 uppercase tracking-wider">Source</span>
+                <ExternalLink size={10} className="text-white/60" />
+              </a>
+            )}
+          </div>
         </div>
       </div>
 
@@ -526,6 +558,7 @@ export const FeedPost = React.memo<FeedPostProps>(({ article, isActive, isNextPo
                       { id: 'quiz', label: 'Quiz' },
                       { id: 'analysis', label: 'Pros & Cons' },
                       { id: 'media', label: 'Media' },
+                      { id: 'flashcards', label: 'Cards' },
                     ].map((tab) => (
                       <button
                         key={tab.id}
@@ -654,6 +687,13 @@ export const FeedPost = React.memo<FeedPostProps>(({ article, isActive, isNextPo
                           details.videoScript && details.podcastScript ? (
                             <MediaSection videoScript={details.videoScript} podcastScript={details.podcastScript} />
                           ) : <div className="py-20 text-center text-white/20 font-mono text-[10px] uppercase tracking-widest">Synthesizing Media...</div>
+                        )}
+                        {activeTab === 'flashcards' && (
+                          details.flashcards ? (
+                            <Flashcards cards={details.flashcards} />
+                          ) : (
+                            <div className="py-20 text-center text-white/20 font-mono text-[10px] uppercase tracking-widest">Generating Flashcards...</div>
+                          )
                         )}
                         {activeTab === 'comments' && <CommentsSection articleId={article.id} />}
                       </motion.div>

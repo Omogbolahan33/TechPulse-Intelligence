@@ -15,11 +15,54 @@ import {
   getDoc,
   setDoc
 } from 'firebase/firestore';
-import firebaseConfig from '../firebase-applet-config.json';
 
-const app = initializeApp(firebaseConfig);
+// Firebase configuration from environment variables
+// In production, these are set via environment variables
+// In development, they come from the imported config or env vars
+const getEnvVar = (key: string): string | undefined => {
+  // Try Vite env first (client-side), then Node env (server-side)
+  try {
+    if (typeof import.meta !== 'undefined' && (import.meta as any).env) {
+      return (import.meta as any).env[key] || process.env[key];
+    }
+  } catch {
+    // import.meta not available
+  }
+  return process.env[key];
+};
+
+const firebaseConfig = {
+  projectId: getEnvVar('VITE_FIREBASE_PROJECT_ID'),
+  appId: getEnvVar('VITE_FIREBASE_APP_ID'),
+  apiKey: getEnvVar('VITE_FIREBASE_API_KEY'),
+  authDomain: getEnvVar('VITE_FIREBASE_AUTH_DOMAIN'),
+  storageBucket: getEnvVar('VITE_FIREBASE_STORAGE_BUCKET'),
+  messagingSenderId: getEnvVar('VITE_FIREBASE_MESSAGING_SENDER_ID'),
+  measurementId: getEnvVar('VITE_FIREBASE_MEASUREMENT_ID'),
+};
+
+// Fallback to config file for development (will be removed in production)
+const getFirebaseConfig = () => {
+  // If env vars are not set, try to load from config file
+  if (!firebaseConfig.apiKey) {
+    try {
+      // Dynamic import to avoid bundling in production if not needed
+      const config = require('../firebase-applet-config.json');
+      return {
+        ...config,
+        firestoreDatabaseId: config.firestoreDatabaseId,
+      };
+    } catch {
+      console.warn('Firebase config not found. Set VITE_FIREBASE_* environment variables.');
+    }
+  }
+  return { ...firebaseConfig, firestoreDatabaseId: process.env.VITE_FIREBASE_DATABASE_ID };
+};
+
+const config = getFirebaseConfig();
+const app = initializeApp(config);
 export const auth = getAuth(app);
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+export const db = getFirestore(app, config.firestoreDatabaseId);
 export const googleProvider = new GoogleAuthProvider();
 
 export { 
