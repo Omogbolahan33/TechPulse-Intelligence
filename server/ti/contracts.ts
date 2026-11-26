@@ -214,7 +214,32 @@ function asRecord(value: unknown, path: string): Record<string, unknown> {
   if (prototype !== Object.prototype && prototype !== null) {
     return fail(path, "must be a plain object");
   }
+  if (Object.getOwnPropertySymbols(value).length > 0) fail(path, "must not contain symbol properties");
+  for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(value))) {
+    if (!descriptor.enumerable || !Object.hasOwn(descriptor, "value")) {
+      fail(`${path}.${key}`, "must contain only enumerable data properties");
+    }
+  }
   return value as Record<string, unknown>;
+}
+
+function assertDenseArray(value: unknown, path: string): asserts value is unknown[] {
+  if (!Array.isArray(value)) fail(path, "must be an array");
+  const array = value as unknown[];
+  if (Object.getPrototypeOf(array) !== Array.prototype || Object.getOwnPropertySymbols(array).length > 0) {
+    fail(path, "must be a plain array without symbol properties");
+  }
+  const keys = Object.getOwnPropertyNames(array);
+  if (keys.length !== array.length + 1 || !keys.includes("length")) {
+    fail(path, "must be dense and must not contain extra array properties");
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(array);
+  for (let index = 0; index < array.length; index += 1) {
+    const descriptor = descriptors[String(index)];
+    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, "value")) {
+      fail(`${path}[${index}]`, "must be an enumerable data element");
+    }
+  }
 }
 
 function assertKeys(
@@ -265,6 +290,13 @@ function assertPayloadSize(value: unknown, maxBytes: number, path: string): void
   }
 }
 
+function assertContextSize(context: readonly unknown[], maxBytes: number, path: string): void {
+  const serializedBytes = new TextEncoder().encode(JSON.stringify(context)).byteLength;
+  if (serializedBytes > maxBytes) {
+    fail(path, `exceeds configured context byte bound (${maxBytes} bytes)`);
+  }
+}
+
 function readString(
   value: unknown,
   path: string,
@@ -291,7 +323,7 @@ function readStringArray(
   limits: ContractLimits,
   maxItems = limits.maxArrayItems,
 ): string[] {
-  if (!Array.isArray(value)) return fail(path, "must be an array");
+  assertDenseArray(value, path);
   if (value.length > maxItems) fail(path, `exceeds configured item bound (${maxItems})`);
   return value.map((item, index) => readString(item, `${path}[${index}]`, limits));
 }
@@ -309,7 +341,8 @@ function readKnownLanguage(
   limits: ContractLimits,
   supportedLanguages: readonly string[],
 ): string {
-  if (!Array.isArray(supportedLanguages) || supportedLanguages.length === 0) {
+  assertDenseArray(supportedLanguages, "supportedLanguages");
+  if (supportedLanguages.length === 0) {
     fail("supportedLanguages", "an explicit non-empty language allowlist is required");
   }
   const language = readString(value, path, limits);
@@ -437,7 +470,7 @@ export function validatePreferenceInput(
   if (!(APPROVED_PERSONA_IDS as readonly string[]).includes(personaId)) {
     fail(`${path}.personaId`, "is not an approved persona");
   }
-  if (!Array.isArray(value.selectedInterests)) fail(`${path}.selectedInterests`, "must be an array");
+  assertDenseArray(value.selectedInterests, `${path}.selectedInterests`);
   if (value.selectedInterests.length > 3) fail(`${path}.selectedInterests`, "exceeds the approved maximum of 3 interests");
   const selectedInterests = value.selectedInterests.map((item, index): SelectedInterestV2 => {
     const interestPath = `${path}.selectedInterests[${index}]`;
@@ -470,7 +503,8 @@ export function validatePreferenceInput(
 
 /** Selects the highest shared Deep Dive schema; both v1 TI and v2 CG-mapped requests are explicit. */
 export function negotiateDeepDiveInputVersion(offeredVersions: readonly number[]): typeof SUPPORTED_DEEP_DIVE_INPUT_VERSIONS[number] {
-  if (!Array.isArray(offeredVersions) || offeredVersions.some((version) => !Number.isSafeInteger(version))) {
+  assertDenseArray(offeredVersions, "offeredDeepDiveVersions");
+  if (offeredVersions.some((version) => !Number.isSafeInteger(version))) {
     fail("offeredDeepDiveVersions", "must contain only integer versions");
   }
   const common = offeredVersions.filter((version): version is typeof SUPPORTED_DEEP_DIVE_INPUT_VERSIONS[number] =>
@@ -482,7 +516,8 @@ export function negotiateDeepDiveInputVersion(offeredVersions: readonly number[]
 
 /** Selects the highest explicitly shared preference schema; v1 cannot omit required metadata. */
 export function negotiatePreferenceVersion(offeredVersions: readonly number[]): typeof CURRENT_PREFERENCE_INPUT_VERSION {
-  if (!Array.isArray(offeredVersions) || offeredVersions.some((version) => !Number.isSafeInteger(version))) {
+  assertDenseArray(offeredVersions, "offeredPreferenceVersions");
+  if (offeredVersions.some((version) => !Number.isSafeInteger(version))) {
     fail("offeredPreferenceVersions", "must contain only integer versions");
   }
   if (!offeredVersions.includes(CURRENT_PREFERENCE_INPUT_VERSION)) {
@@ -574,11 +609,10 @@ function readRecentContext(
   supportedLanguages: readonly string[],
 ): RecentContextItemV1[] {
   const path = "deepDive.recentContext";
-  if (!Array.isArray(value)) return fail(path, "must be an array");
+  assertDenseArray(value, path);
   if (value.length > limits.maxContextItems) {
     fail(path, `exceeds configured context item bound (${limits.maxContextItems})`);
   }
-  let totalBytes = 0;
   const result = value.map((item, index): RecentContextItemV1 => {
     const itemPath = `${path}[${index}]`;
     const context = asRecord(item, itemPath);
@@ -594,12 +628,9 @@ function readRecentContext(
         ? {}
         : { quoteSnapshot: readQuoteSnapshot(context.quoteSnapshot, limits, `${itemPath}.quoteSnapshot`, supportedLanguages) }),
     };
-    totalBytes += new TextEncoder().encode(JSON.stringify(parsed)).byteLength;
     return parsed;
   });
-  if (totalBytes > limits.maxContextBytes) {
-    fail(path, `exceeds configured context byte bound (${limits.maxContextBytes} bytes)`);
-  }
+  assertContextSize(result, limits.maxContextBytes, path);
   return result;
 }
 
@@ -657,6 +688,7 @@ function readJsonValue(value: unknown, path: string, limits: ContractLimits, dep
     return value;
   }
   if (Array.isArray(value)) {
+    assertDenseArray(value, path);
     if (value.length > limits.maxArrayItems) fail(path, `exceeds configured JSON array bound (${limits.maxArrayItems})`);
     return value.map((item, index) => readJsonValue(item, `${path}[${index}]`, limits, depth + 1));
   }
@@ -745,11 +777,10 @@ export function mapCanonicalCgDeepDiveDispatchToTi(
   const current = asRecord(dispatch.currentMessage, `${path}.currentMessage`);
   assertKeys(current, ["text"], ["quote"], `${path}.currentMessage`);
   const contextInput = dispatch.recentContext;
-  if (!Array.isArray(contextInput)) fail(`${path}.recentContext`, "must be an array");
+  assertDenseArray(contextInput, `${path}.recentContext`);
   if (contextInput.length > limits.maxContextItems) {
     fail(`${path}.recentContext`, `exceeds configured context item bound (${limits.maxContextItems})`);
   }
-  let contextBytes = 0;
   const recentContext = contextInput.map((entry, index): DeepDiveContextItemV2 => {
     const itemPath = `${path}.recentContext[${index}]`;
     const item = asRecord(entry, itemPath);
@@ -761,12 +792,9 @@ export function mapCanonicalCgDeepDiveDispatchToTi(
       content: readString(item.text, `${itemPath}.text`, limits),
       ...(item.quote === undefined ? {} : { quote: projectQuote(item.quote, `${itemPath}.quote`) }),
     };
-    contextBytes += new TextEncoder().encode(JSON.stringify(normalized)).byteLength;
     return normalized;
   });
-  if (contextBytes > limits.maxContextBytes) {
-    fail(`${path}.recentContext`, `exceeds configured context byte bound (${limits.maxContextBytes} bytes)`);
-  }
+  assertContextSize(recentContext, limits.maxContextBytes, `${path}.recentContext`);
 
   const constraints = asRecord(dispatch.responseConstraints, `${path}.responseConstraints`);
   assertKeys(constraints, ["responseSchemaVersion", "postLanguage", "safetyRequirements"], [], `${path}.responseConstraints`);
@@ -792,6 +820,64 @@ export function mapCanonicalCgDeepDiveDispatchToTi(
       responseSchemaVersion: readString(constraints.responseSchemaVersion, `${path}.responseConstraints.responseSchemaVersion`, limits),
       postLanguage,
       safetyRequirements: safetyRequirementsValue as JsonObject,
+    },
+  };
+  assertPayloadSize(input, limits.maxPayloadBytes, path);
+  assertPayloadSize(result, limits.maxPayloadBytes, `${path}.normalized`);
+  return result;
+}
+
+/** Validates the normalized CG-dispatch Deep Dive envelope before request hashing or persistence. */
+export function validateDeepDiveRequestInputV2(
+  input: unknown,
+  limits: ContractLimits,
+  supportedLanguages: readonly string[],
+): DeepDiveRequestInputV2 {
+  assertLimits(limits);
+  const path = "deepDiveV2";
+  const value = asRecord(input, path);
+  assertKeys(value,
+    ["schemaVersion", "userMessageId", "requestRef", "conversationRef", "currentMessage", "recentContext", "responseConstraints"],
+    ["quote"], path);
+  if (value.schemaVersion !== 2) fail(`${path}.schemaVersion`, "unsupported or missing schema version");
+  assertDenseArray(value.recentContext, `${path}.recentContext`);
+  if (value.recentContext.length > limits.maxContextItems) {
+    fail(`${path}.recentContext`, `exceeds configured context item bound (${limits.maxContextItems})`);
+  }
+  const recentContext = value.recentContext.map((entry, index): DeepDiveContextItemV2 => {
+    const itemPath = `${path}.recentContext[${index}]`;
+    const item = asRecord(entry, itemPath);
+    assertKeys(item, ["messageId", "role", "content"], ["quote"], itemPath);
+    if (item.role !== "user" && item.role !== "assistant") fail(`${itemPath}.role`, "must be user or assistant");
+    const normalized: DeepDiveContextItemV2 = {
+      messageId: readString(item.messageId, `${itemPath}.messageId`, limits),
+      role: item.role,
+      content: readString(item.content, `${itemPath}.content`, limits),
+      ...(item.quote === undefined ? {} : { quote: readTiMappedCgQuote(item.quote, limits, supportedLanguages, `${itemPath}.quote`) }),
+    };
+    return normalized;
+  });
+  assertContextSize(recentContext, limits.maxContextBytes, `${path}.recentContext`);
+  const constraints = asRecord(value.responseConstraints, `${path}.responseConstraints`);
+  assertKeys(constraints, ["schemaVersion", "responseSchemaVersion", "postLanguage", "safetyRequirements"], [], `${path}.responseConstraints`);
+  if (constraints.schemaVersion !== 2) fail(`${path}.responseConstraints.schemaVersion`, "unsupported or missing schema version");
+  const safetyRequirements = readJsonValue(constraints.safetyRequirements, `${path}.responseConstraints.safetyRequirements`, limits);
+  if (safetyRequirements === null || Array.isArray(safetyRequirements) || typeof safetyRequirements !== "object") {
+    fail(`${path}.responseConstraints.safetyRequirements`, "must be a JSON object");
+  }
+  const result: DeepDiveRequestInputV2 = {
+    schemaVersion: 2,
+    userMessageId: readString(value.userMessageId, `${path}.userMessageId`, limits),
+    requestRef: readString(value.requestRef, `${path}.requestRef`, limits),
+    conversationRef: readString(value.conversationRef, `${path}.conversationRef`, limits),
+    currentMessage: readString(value.currentMessage, `${path}.currentMessage`, limits),
+    recentContext,
+    ...(value.quote === undefined ? {} : { quote: readTiMappedCgQuote(value.quote, limits, supportedLanguages, `${path}.quote`) }),
+    responseConstraints: {
+      schemaVersion: 2,
+      responseSchemaVersion: readString(constraints.responseSchemaVersion, `${path}.responseConstraints.responseSchemaVersion`, limits),
+      postLanguage: readKnownLanguage(constraints.postLanguage, `${path}.responseConstraints.postLanguage`, limits, supportedLanguages),
+      safetyRequirements: safetyRequirements as JsonObject,
     },
   };
   assertPayloadSize(input, limits.maxPayloadBytes, path);
@@ -854,7 +940,8 @@ export function validateRestrictedRequestMetadata(
 
 /** Selects the highest explicitly shared contract version; never coerces between versions. */
 export function negotiateInputVersion(offeredVersions: readonly number[]): TiInputVersion {
-  if (!Array.isArray(offeredVersions) || offeredVersions.some((version) => !Number.isSafeInteger(version))) {
+  assertDenseArray(offeredVersions, "offeredVersions");
+  if (offeredVersions.some((version) => !Number.isSafeInteger(version))) {
     fail("offeredVersions", "must contain only integer versions");
   }
   const common = offeredVersions.filter((version): version is TiInputVersion =>

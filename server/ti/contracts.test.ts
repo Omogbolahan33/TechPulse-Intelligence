@@ -12,6 +12,7 @@ import {
   validateCanonicalPostInput,
   validateCanonicalCgPostInput,
   validateDeepDiveRequestInput,
+  validateDeepDiveRequestInputV2,
   validatePreferenceInput,
   validateRestrictedRequestMetadata,
   type ContractLimits,
@@ -260,7 +261,81 @@ test("CG Deep Dive dispatch maps requestReference, text/quote fields and respons
   expectContractError(() => mapCanonicalCgDeepDiveDispatchToTi({ ...cgDeepDiveDispatch, responseConstraints: { ...cgDeepDiveDispatch.responseConstraints, safetyRequirements: "not-an-object" } }, canonicalPost, limits, supportedLanguages));
 });
 
+test("context byte bounds count the complete UTF-8 serialized array at its exact boundary", () => {
+  const oneMessageDispatch = {
+    ...cgDeepDiveDispatch,
+    recentContext: [{ messageId: "synthetic-context", role: "user", text: "🙂" }],
+  };
+  const mapped = mapCanonicalCgDeepDiveDispatchToTi(oneMessageDispatch, canonicalPost, limits, supportedLanguages);
+  const exactBytes = Buffer.byteLength(JSON.stringify(mapped.recentContext), "utf8");
+  assert.ok(exactBytes > Buffer.byteLength(JSON.stringify(mapped.recentContext[0]), "utf8"));
+
+  const exactLimit = { ...limits, maxContextBytes: exactBytes };
+  assert.deepEqual(
+    mapCanonicalCgDeepDiveDispatchToTi(oneMessageDispatch, canonicalPost, exactLimit, supportedLanguages).recentContext,
+    mapped.recentContext,
+  );
+  expectContractError(() => mapCanonicalCgDeepDiveDispatchToTi(
+    oneMessageDispatch,
+    canonicalPost,
+    { ...limits, maxContextBytes: exactBytes - 1 },
+    supportedLanguages,
+  ));
+
+  const normalized = validateDeepDiveRequestInputV2(mapped, exactLimit, supportedLanguages);
+  assert.deepEqual(normalized.recentContext, mapped.recentContext);
+  expectContractError(() => validateDeepDiveRequestInputV2(
+    mapped,
+    { ...limits, maxContextBytes: exactBytes - 1 },
+    supportedLanguages,
+  ));
+
+  const oneMessageV1 = {
+    ...deepDiveRequest,
+    recentContext: [{ messageId: "synthetic-context", role: "user", content: "🙂" }],
+  };
+  const validatedV1 = validateDeepDiveRequestInput(oneMessageV1, limits, supportedLanguages);
+  const v1ExactBytes = Buffer.byteLength(JSON.stringify(validatedV1.recentContext), "utf8");
+  assert.deepEqual(
+    validateDeepDiveRequestInput(oneMessageV1, { ...limits, maxContextBytes: v1ExactBytes }, supportedLanguages).recentContext,
+    validatedV1.recentContext,
+  );
+  expectContractError(() => validateDeepDiveRequestInput(
+    oneMessageV1,
+    { ...limits, maxContextBytes: v1ExactBytes - 1 },
+    supportedLanguages,
+  ));
+});
+
 test("contract bounds require explicit positive configuration", () => {
   expectContractError(() => validateCanonicalPostInput(canonicalPost, undefined as unknown as ContractLimits, supportedLanguages));
   expectContractError(() => validateCanonicalPostInput(canonicalPost, { ...limits, maxPayloadBytes: 0 }, supportedLanguages));
+});
+
+test("strict object and array validation rejects getters, symbols, sparse arrays and extra array properties", () => {
+  let getterRead = false;
+  const accessorRecord = { ...canonicalPost };
+  Object.defineProperty(accessorRecord, "title", {
+    enumerable: true,
+    get() { getterRead = true; return "synthetic getter"; },
+  });
+  expectContractError(() => validateCanonicalPostInput(accessorRecord, limits, supportedLanguages));
+  assert.equal(getterRead, false, "validation inspects descriptors rather than executing request getters");
+
+  const symbolRecord = { ...canonicalPost, [Symbol("synthetic")]: "forbidden" };
+  expectContractError(() => validateCanonicalPostInput(symbolRecord, limits, supportedLanguages));
+  const sparseContext = new Array(1);
+  expectContractError(() => validateDeepDiveRequestInput({ ...deepDiveRequest, recentContext: sparseContext }, limits, supportedLanguages));
+  const extraPropertyContext = [...deepDiveRequest.recentContext] as typeof deepDiveRequest.recentContext & { syntheticExtra?: string };
+  extraPropertyContext.syntheticExtra = "not in JSON array elements";
+  expectContractError(() => validateDeepDiveRequestInput({ ...deepDiveRequest, recentContext: extraPropertyContext }, limits, supportedLanguages));
+});
+
+test("normalized v2 request validator checks response envelope, bounds and canonical quote snapshot shape", () => {
+  const mapped = mapCanonicalCgDeepDiveDispatchToTi(cgDeepDiveDispatch, canonicalPost, limits, supportedLanguages);
+  const validated = validateDeepDiveRequestInputV2(mapped, limits, supportedLanguages);
+  assert.deepEqual(validated, mapped);
+  expectContractError(() => validateDeepDiveRequestInputV2({ ...mapped, fullThread: [] }, limits, supportedLanguages));
+  expectContractError(() => validateDeepDiveRequestInputV2({ ...mapped, responseConstraints: { ...mapped.responseConstraints, postLanguage: "xx" } }, limits, supportedLanguages));
+  expectContractError(() => validateDeepDiveRequestInputV2({ ...mapped, quote: { ...mapped.quote!, unknown: "forbidden" } }, limits, supportedLanguages));
 });
