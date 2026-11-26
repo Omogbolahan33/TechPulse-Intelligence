@@ -1,6 +1,11 @@
 export const CURRENT_TI_INPUT_VERSION = 1 as const;
 export const SUPPORTED_TI_INPUT_VERSIONS = [CURRENT_TI_INPUT_VERSION] as const;
 
+// Preferences gained resolved persona guidance and full interest metadata in v2.
+// A peer must negotiate v2; incomplete v1 preferences are never silently upgraded.
+export const CURRENT_PREFERENCE_INPUT_VERSION = 2 as const;
+export const SUPPORTED_PREFERENCE_INPUT_VERSIONS = [CURRENT_PREFERENCE_INPUT_VERSION] as const;
+
 export const APPROVED_PERSONA_IDS = [
   "Founder",
   "Investor",
@@ -49,16 +54,25 @@ export interface CanonicalPostInputV1 {
   readonly sourceSnapshotRef?: string;
 }
 
-export interface PreferenceInputV1 {
-  readonly schemaVersion: 1;
+export interface SelectedInterestV2 {
+  readonly id: string;
+  readonly label: string;
+  readonly description: string;
+}
+
+export interface PreferenceInputV2 {
+  readonly schemaVersion: 2;
   readonly personaId: PersonaId;
   readonly personaDefinitionVersion: string;
-  readonly interestIds: readonly string[];
+  /** Resolved, untrusted persona guidance supplied by CG. */
+  readonly resolvedPersonaGuidance: string;
+  readonly selectedInterests: readonly SelectedInterestV2[];
   readonly preferenceRevision: StableId;
   readonly interestTaxonomyVersion: string;
-  /** Untrusted data; consumers must not treat this as policy or privileged instructions. */
-  readonly generationGuidance?: string;
 }
+
+/** @deprecated Use PreferenceInputV2; v1 is deliberately not negotiated. */
+export type PreferenceInputV1 = PreferenceInputV2;
 
 export interface CGPostQuoteSnapshotV1 {
   readonly type: "cg_post";
@@ -327,39 +341,63 @@ export function validateCanonicalPostInput(
 export function validatePreferenceInput(
   input: unknown,
   limits: ContractLimits,
-): PreferenceInputV1 {
+): PreferenceInputV2 {
   assertLimits(limits);
   const path = "preferences";
   const value = asRecord(input, path);
   assertKeys(
     value,
-    ["schemaVersion", "personaId", "personaDefinitionVersion", "interestIds", "preferenceRevision", "interestTaxonomyVersion"],
-    ["generationGuidance"],
+    ["schemaVersion", "personaId", "personaDefinitionVersion", "resolvedPersonaGuidance", "selectedInterests", "preferenceRevision", "interestTaxonomyVersion"],
+    [],
     path,
   );
-  readVersion1(value, path);
+  if (value.schemaVersion !== CURRENT_PREFERENCE_INPUT_VERSION) {
+    fail(`${path}.schemaVersion`, "unsupported or missing preference schema version");
+  }
   const personaId = readString(value.personaId, `${path}.personaId`, limits);
   if (!(APPROVED_PERSONA_IDS as readonly string[]).includes(personaId)) {
     fail(`${path}.personaId`, "is not an approved persona");
   }
-  const interestIds = readStringArray(value.interestIds, `${path}.interestIds`, limits, 3);
+  if (!Array.isArray(value.selectedInterests)) fail(`${path}.selectedInterests`, "must be an array");
+  if (value.selectedInterests.length > 3) fail(`${path}.selectedInterests`, "exceeds the approved maximum of 3 interests");
+  const selectedInterests = value.selectedInterests.map((item, index): SelectedInterestV2 => {
+    const interestPath = `${path}.selectedInterests[${index}]`;
+    const interest = asRecord(item, interestPath);
+    assertKeys(interest, ["id", "label", "description"], [], interestPath);
+    return {
+      id: readString(interest.id, `${interestPath}.id`, limits),
+      label: readString(interest.label, `${interestPath}.label`, limits),
+      description: readString(interest.description, `${interestPath}.description`, limits),
+    };
+  });
+  const interestIds = selectedInterests.map(({ id }) => id);
   if (new Set(interestIds).size !== interestIds.length) {
-    fail(`${path}.interestIds`, "must not contain duplicate IDs");
+    fail(`${path}.selectedInterests`, "must not contain duplicate stable IDs");
   }
-  const canonicalInterestIds = [...interestIds].sort();
-  const result: PreferenceInputV1 = {
-    schemaVersion: 1,
+  // Stable IDs define an unordered set. Sort whole records, preserving their metadata association.
+  selectedInterests.sort((left, right) => left.id.localeCompare(right.id));
+  const result: PreferenceInputV2 = {
+    schemaVersion: CURRENT_PREFERENCE_INPUT_VERSION,
     personaId: personaId as PersonaId,
     personaDefinitionVersion: readString(value.personaDefinitionVersion, `${path}.personaDefinitionVersion`, limits),
-    interestIds: canonicalInterestIds,
+    resolvedPersonaGuidance: readString(value.resolvedPersonaGuidance, `${path}.resolvedPersonaGuidance`, limits),
+    selectedInterests,
     preferenceRevision: readStableId(value.preferenceRevision, `${path}.preferenceRevision`, limits),
     interestTaxonomyVersion: readString(value.interestTaxonomyVersion, `${path}.interestTaxonomyVersion`, limits),
-    ...(value.generationGuidance === undefined
-      ? {}
-      : { generationGuidance: readString(value.generationGuidance, `${path}.generationGuidance`, limits, { allowEmpty: true }) }),
   };
   assertPayloadSize(input, limits.maxPayloadBytes, path);
   return result;
+}
+
+/** Selects the highest explicitly shared preference schema; v1 cannot omit required metadata. */
+export function negotiatePreferenceVersion(offeredVersions: readonly number[]): typeof CURRENT_PREFERENCE_INPUT_VERSION {
+  if (!Array.isArray(offeredVersions) || offeredVersions.some((version) => !Number.isSafeInteger(version))) {
+    fail("offeredPreferenceVersions", "must contain only integer versions");
+  }
+  if (!offeredVersions.includes(CURRENT_PREFERENCE_INPUT_VERSION)) {
+    fail("offeredPreferenceVersions", "no supported preference contract version was offered");
+  }
+  return CURRENT_PREFERENCE_INPUT_VERSION;
 }
 
 function readTimestamp(value: unknown, path: string, limits: ContractLimits): string {
@@ -510,6 +548,41 @@ export function validateDeepDiveRequestInput(
   };
   assertPayloadSize(input, limits.maxPayloadBytes, path);
   return result;
+}
+
+export interface TiInputMappingV1 {
+  readonly schemaVersion: 1;
+  readonly canonicalPost: CanonicalPostInputV1;
+  readonly preferences: PreferenceInputV2;
+  /** Derived only from the canonical post; no independent language/default is accepted. */
+  readonly outputLanguage: string;
+  readonly deepDiveRequest?: DeepDiveRequestInputV1;
+}
+
+/** Validates and maps canonical CG payloads without inventing IDs, defaults, or identity. */
+export function mapCanonicalCgInputsToTi(
+  input: unknown,
+  limits: ContractLimits,
+  supportedLanguages: readonly string[],
+): TiInputMappingV1 {
+  assertLimits(limits);
+  const path = "cgToTi";
+  const value = asRecord(input, path);
+  assertKeys(value, ["canonicalPost", "preferences"], ["deepDiveRequest"], path);
+  const canonicalPost = validateCanonicalPostInput(value.canonicalPost, limits, supportedLanguages);
+  const preferences = validatePreferenceInput(value.preferences, limits);
+  const deepDiveRequest = value.deepDiveRequest === undefined
+    ? undefined
+    : validateDeepDiveRequestInput(value.deepDiveRequest, limits, supportedLanguages);
+  const mapped: TiInputMappingV1 = {
+    schemaVersion: 1,
+    canonicalPost,
+    preferences,
+    outputLanguage: canonicalPost.language,
+    ...(deepDiveRequest === undefined ? {} : { deepDiveRequest }),
+  };
+  assertPayloadSize(input, limits.maxPayloadBytes, path);
+  return mapped;
 }
 
 export function validateRestrictedRequestMetadata(

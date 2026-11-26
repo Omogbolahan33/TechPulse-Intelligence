@@ -3,15 +3,25 @@ import test from "node:test";
 import {
   APPROVED_PERSONA_IDS,
   ContractValidationError,
+  mapCanonicalCgInputsToTi,
   negotiateInputVersion,
+  negotiatePreferenceVersion,
   validateCanonicalPostInput,
   validateDeepDiveRequestInput,
   validatePreferenceInput,
   validateRestrictedRequestMetadata,
   type ContractLimits,
 } from "./contracts";
+import {
+  canonicalPost,
+  canonicalPreferenceV2,
+  cgPostQuoteSnapshot,
+  deepDiveRequest,
+  insightQuoteSnapshot,
+  preferenceWithInterestsV2,
+} from "./fixtures/canonical-cg";
 
-// Local synthetic bounds and language policy; these are not launch configuration.
+// Synthetic test bounds/language policy only; no service defaults or launch values.
 const limits: ContractLimits = {
   maxStringCodePoints: 512,
   maxArrayItems: 12,
@@ -19,208 +29,174 @@ const limits: ContractLimits = {
   maxContextItems: 4,
   maxContextBytes: 4_096,
 };
-const testLanguages = ["en", "fr"];
-
-const canonicalPost = {
-  schemaVersion: 1,
-  postId: "post-123",
-  postContentVersion: "version-7",
-  title: "Synthetic post",
-  content: "A privacy-cleared synthetic technology post.",
-  language: "en",
-  categoryId: 0,
-  subcategoryId: "sub-disc-02",
-  topicIds: ["topic-cloud"],
-  source: {
-    url: "https://publisher.example/synthetic-article",
-    attribution: "Synthetic Publisher",
-  },
-  moderationState: "visible",
-  publicationState: "published",
-  sourceSnapshotRef: "snapshot-123",
-};
-
-const generalPreference = {
-  schemaVersion: 1,
-  personaId: "General",
-  personaDefinitionVersion: "general-v1",
-  interestIds: [],
-  preferenceRevision: "preference-rev-7",
-  interestTaxonomyVersion: "taxonomy-v1",
-};
-
-const cgPostQuote = {
-  type: "cg_post",
-  postId: "post-123",
-  postContentVersion: "version-7",
-  title: "Synthetic quoted post",
-  content: "A quoted synthetic post snapshot.",
-  language: "en",
-  source: {
-    url: "https://publisher.example/synthetic-article",
-    attribution: "Synthetic Publisher",
-  },
-  sourceSnapshotRef: "source-snapshot-7",
-  capturedAt: "2026-11-26T08:00:00Z",
-  knownCurrentPostContentVersion: "version-8",
-};
-
-const insightQuote = {
-  type: "intelligence_insight",
-  artifactId: "artifact-123",
-  artifactVersion: "artifact-version-2",
-  itemId: "item-3",
-  content: "A synthetic insight item.",
-  language: "en",
-  capturedAt: "2026-11-26T08:01:00Z",
-  knownCurrentArtifactVersion: null,
-};
-
-const deepDiveRequest = {
-  schemaVersion: 1,
-  userMessageId: "message-123",
-  requestRef: "request-ref-123",
-  conversationRef: "conversation-ref-123",
-  currentMessage: "What does this synthetic claim mean?",
-  recentContext: [
-    { messageId: "message-previous", role: "user", content: "A synthetic prior question." },
-    { messageId: "message-answer", role: "assistant", content: "A synthetic prior answer.", quoteSnapshot: insightQuote },
-  ],
-  quoteSnapshot: cgPostQuote,
-  responseConstraints: {
-    schemaVersion: 1,
-    outputSchemaVersion: "deep-dive-v1",
-    safetyPolicyVersion: "safety-v1",
-    locale: "en-NG",
-  },
-};
+const supportedLanguages = ["en", "fr"];
 
 function expectContractError(action: () => unknown): void {
   assert.throws(action, ContractValidationError);
 }
 
-test("canonical CG post fields, version/hash, category IDs, language, and optional source are preserved", () => {
-  const parsed = validateCanonicalPostInput(canonicalPost, limits, testLanguages);
-  assert.equal(parsed.postContentVersion, "version-7");
-  assert.equal(parsed.language, "en");
-  assert.equal(parsed.categoryId, 0);
+test("canonical fixtures are deeply immutable and contain synthetic CG-shaped inputs", () => {
+  for (const value of [canonicalPost, canonicalPreferenceV2, preferenceWithInterestsV2, deepDiveRequest]) {
+    assert.ok(Object.isFrozen(value));
+  }
+  assert.ok(Object.isFrozen(canonicalPost.source));
+  assert.ok(Object.isFrozen(preferenceWithInterestsV2.selectedInterests[0]));
+  assert.match(canonicalPost.postId, /^synthetic-/);
+  assert.equal("userId" in canonicalPreferenceV2, false);
+});
+
+test("canonical post preserves version/hash, language, source and snapshot provenance", () => {
+  const parsed = validateCanonicalPostInput(canonicalPost, limits, supportedLanguages);
+  assert.equal(parsed.postContentVersion, canonicalPost.postContentVersion);
+  assert.equal(parsed.contentHash, canonicalPost.contentHash);
+  assert.equal(parsed.language, "fr");
   assert.deepEqual(parsed.source, canonicalPost.source);
-  assert.equal(parsed.content, canonicalPost.content);
+  assert.equal(parsed.sourceSnapshotRef, canonicalPost.sourceSnapshotRef);
 
-  const hashOnlyPost = {
-    ...canonicalPost,
-    postContentVersion: undefined,
-    contentHash: "sha256:synthetic-hash",
-    source: undefined,
-  };
-  const parsedHashOnly = validateCanonicalPostInput(hashOnlyPost, limits, testLanguages);
-  assert.equal(parsedHashOnly.contentHash, "sha256:synthetic-hash");
-  assert.equal(parsedHashOnly.source, undefined);
+  const versionOnly = { ...canonicalPost, contentHash: undefined };
+  assert.equal(validateCanonicalPostInput(versionOnly, limits, supportedLanguages).postContentVersion, canonicalPost.postContentVersion);
+  const hashOnly = { ...canonicalPost, postContentVersion: undefined, source: undefined, sourceSnapshotRef: undefined };
+  const hashParsed = validateCanonicalPostInput(hashOnly, limits, supportedLanguages);
+  assert.equal(hashParsed.contentHash, canonicalPost.contentHash);
+  assert.equal(hashParsed.source, undefined);
+  assert.equal(hashParsed.sourceSnapshotRef, undefined);
+
+  const versionAndNoSource = { ...canonicalPost, contentHash: undefined, source: undefined, sourceSnapshotRef: undefined };
+  const versionParsed = validateCanonicalPostInput(versionAndNoSource, limits, supportedLanguages);
+  assert.equal(versionParsed.postContentVersion, canonicalPost.postContentVersion);
+  assert.equal(versionParsed.source, undefined);
 });
 
-test("canonical post rejects TI-renamed CG fields, unknown keys, missing version/hash, and unknown language", () => {
-  expectContractError(() => validateCanonicalPostInput({ ...canonicalPost, extra: true }, limits, testLanguages));
-  expectContractError(() => validateCanonicalPostInput({ ...canonicalPost, schemaVersion: 2 }, limits, testLanguages));
-  expectContractError(() => validateCanonicalPostInput({ ...canonicalPost, postVersion: "wrong-field" }, limits, testLanguages));
-  expectContractError(() => validateCanonicalPostInput({ ...canonicalPost, postContentVersion: undefined }, limits, testLanguages));
-  expectContractError(() => validateCanonicalPostInput({ ...canonicalPost, language: null }, limits, testLanguages));
-  expectContractError(() => validateCanonicalPostInput({ ...canonicalPost, language: "unknown" }, limits, testLanguages));
-  expectContractError(() => validateCanonicalPostInput(canonicalPost, limits, []));
+test("canonical post rejects malformed versions, privacy fields, unknown fields, and unsupported language", () => {
+  expectContractError(() => validateCanonicalPostInput({ ...canonicalPost, schemaVersion: 2 }, limits, supportedLanguages));
+  expectContractError(() => validateCanonicalPostInput({ ...canonicalPost, postContentVersion: undefined, contentHash: undefined }, limits, supportedLanguages));
+  expectContractError(() => validateCanonicalPostInput({ ...canonicalPost, contentHash: "" }, limits, supportedLanguages));
+  expectContractError(() => validateCanonicalPostInput({ ...canonicalPost, unknown: true }, limits, supportedLanguages));
+  expectContractError(() => validateCanonicalPostInput({ ...canonicalPost, userId: "synthetic-private-user" }, limits, supportedLanguages));
+  expectContractError(() => validateCanonicalPostInput({ ...canonicalPost, language: null }, limits, supportedLanguages));
+  expectContractError(() => validateCanonicalPostInput({ ...canonicalPost, language: "not-enabled" }, limits, supportedLanguages));
 });
 
-test("canonical post applies explicit Unicode, array, and serialized payload bounds", () => {
+test("post bounds enforce Unicode code points, arrays, and serialized bytes", () => {
   const unicodeLimit = { ...limits, maxStringCodePoints: 128 };
-  const exactlyAtUnicodeBoundary = "🙂".repeat(128);
-  assert.equal(validateCanonicalPostInput({ ...canonicalPost, title: exactlyAtUnicodeBoundary }, unicodeLimit, testLanguages).title,
-    exactlyAtUnicodeBoundary);
-  expectContractError(() => validateCanonicalPostInput({ ...canonicalPost, title: `${exactlyAtUnicodeBoundary}🙂` }, unicodeLimit, testLanguages));
-  expectContractError(() => validateCanonicalPostInput({ ...canonicalPost, topicIds: Array(13).fill("topic") }, limits, testLanguages));
-  expectContractError(() => validateCanonicalPostInput(canonicalPost, { ...limits, maxPayloadBytes: 16 }, testLanguages));
+  const boundary = "🙂".repeat(128);
+  assert.equal(validateCanonicalPostInput({ ...canonicalPost, title: boundary }, unicodeLimit, supportedLanguages).title, boundary);
+  expectContractError(() => validateCanonicalPostInput({ ...canonicalPost, title: `${boundary}🙂` }, unicodeLimit, supportedLanguages));
+  expectContractError(() => validateCanonicalPostInput({ ...canonicalPost, topicIds: Array(13).fill("synthetic-topic") }, limits, supportedLanguages));
+  expectContractError(() => validateCanonicalPostInput(canonicalPost, { ...limits, maxPayloadBytes: 16 }, supportedLanguages));
 });
 
-test("preference accepts the six CG personas, including General with no interests", () => {
+test("preference v2 preserves all six personas, revision/taxonomy versions, and General with no interests", () => {
   assert.deepEqual(APPROVED_PERSONA_IDS, ["Founder", "Investor", "Operator", "Engineer", "Regulator", "General"]);
-  const parsed = validatePreferenceInput(generalPreference, limits);
+  const parsed = validatePreferenceInput(canonicalPreferenceV2, limits);
   assert.equal(parsed.personaId, "General");
-  assert.deepEqual(parsed.interestIds, []);
+  assert.deepEqual(parsed.selectedInterests, []);
+  assert.equal(parsed.preferenceRevision, canonicalPreferenceV2.preferenceRevision);
+  assert.equal(parsed.personaDefinitionVersion, canonicalPreferenceV2.personaDefinitionVersion);
+  assert.equal(parsed.interestTaxonomyVersion, canonicalPreferenceV2.interestTaxonomyVersion);
+  assert.equal(parsed.resolvedPersonaGuidance, canonicalPreferenceV2.resolvedPersonaGuidance);
   for (const personaId of APPROVED_PERSONA_IDS) {
-    assert.equal(validatePreferenceInput({ ...generalPreference, personaId }, limits).personaId, personaId);
+    assert.equal(validatePreferenceInput({ ...canonicalPreferenceV2, personaId }, limits).personaId, personaId);
   }
 });
 
-test("preference uses canonical revision names, rejects duplicate/excess interests and identity fields, and normalizes set order", () => {
-  const first = validatePreferenceInput({
-    ...generalPreference,
-    personaId: "Engineer",
-    interestIds: ["cloud", "ai"],
-  }, limits);
+test("selected interests retain stable IDs, labels, and descriptions while treating order as irrelevant", () => {
+  const parsed = validatePreferenceInput(preferenceWithInterestsV2, limits);
+  assert.deepEqual(parsed.selectedInterests.map((item) => item.id), ["synthetic-interest-ai", "synthetic-interest-cloud"]);
+  assert.equal(parsed.selectedInterests[0].label, "Artificial intelligence");
+  assert.equal(parsed.selectedInterests[0].description, "Synthetic interest description.");
   const reversed = validatePreferenceInput({
-    ...generalPreference,
-    personaId: "Engineer",
-    interestIds: ["ai", "cloud"],
+    ...preferenceWithInterestsV2,
+    selectedInterests: [...preferenceWithInterestsV2.selectedInterests].reverse(),
   }, limits);
-  assert.deepEqual(first.interestIds, ["ai", "cloud"]);
-  assert.deepEqual(reversed.interestIds, first.interestIds);
-  expectContractError(() => validatePreferenceInput({ ...generalPreference, personaId: "unapproved" }, limits));
-  expectContractError(() => validatePreferenceInput({ ...generalPreference, interestIds: ["a", "b", "c", "d"] }, limits));
-  expectContractError(() => validatePreferenceInput({ ...generalPreference, interestIds: ["cloud", "cloud"] }, limits));
-  expectContractError(() => validatePreferenceInput({ ...generalPreference, taxonomyVersion: "old-name" }, limits));
-  expectContractError(() => validatePreferenceInput({ ...generalPreference, userId: "private-user" }, limits));
+  assert.deepEqual(reversed.selectedInterests, parsed.selectedInterests);
 });
 
-test("Deep Dive preserves versioned post/insight snapshots, staleness metadata, context snapshots, and CG constraints", () => {
-  const parsed = validateDeepDiveRequestInput(deepDiveRequest, limits, testLanguages);
-  assert.equal(parsed.userMessageId, "message-123");
-  assert.equal(parsed.quoteSnapshot?.type, "cg_post");
-  assert.equal(parsed.quoteSnapshot?.type === "cg_post" ? parsed.quoteSnapshot.knownCurrentPostContentVersion : undefined, "version-8");
-  assert.equal(parsed.quoteSnapshot?.type === "cg_post" ? parsed.quoteSnapshot.sourceSnapshotRef : undefined, "source-snapshot-7");
-  assert.equal(parsed.recentContext[1].quoteSnapshot?.type, "intelligence_insight");
-  assert.equal(parsed.responseConstraints.locale, "en-NG");
+test("preference rejects omitted metadata, duplicates, excess interests, unknown IDs/personas, and identity fields", () => {
+  expectContractError(() => validatePreferenceInput({ ...canonicalPreferenceV2, schemaVersion: 1 }, limits));
+  expectContractError(() => validatePreferenceInput({ ...canonicalPreferenceV2, personaId: "unapproved" }, limits));
+  expectContractError(() => validatePreferenceInput({ ...canonicalPreferenceV2, resolvedPersonaGuidance: undefined }, limits));
+  expectContractError(() => validatePreferenceInput({ ...canonicalPreferenceV2, resolvedPersonaGuidance: "   " }, limits));
+  expectContractError(() => validatePreferenceInput({ ...canonicalPreferenceV2, selectedInterests: [{ id: "i" }] }, limits));
+  expectContractError(() => validatePreferenceInput({ ...preferenceWithInterestsV2, selectedInterests: [preferenceWithInterestsV2.selectedInterests[0], preferenceWithInterestsV2.selectedInterests[0]] }, limits));
+  expectContractError(() => validatePreferenceInput({ ...canonicalPreferenceV2, selectedInterests: Array(4).fill({ id: "i", label: "label", description: "desc" }) }, limits));
+  expectContractError(() => validatePreferenceInput({ ...canonicalPreferenceV2, userId: "synthetic-private-user" }, limits));
+  expectContractError(() => validatePreferenceInput({ ...canonicalPreferenceV2, profileId: "synthetic-profile" }, limits));
+  expectContractError(() => validatePreferenceInput({ ...canonicalPreferenceV2, unknown: "field" }, limits));
 });
 
-test("Deep Dive rejects unsupported quote shapes, timestamps, languages, full threads, and unbounded context", () => {
-  expectContractError(() => validateDeepDiveRequestInput({ ...deepDiveRequest, fullThread: [] }, limits, testLanguages));
-  expectContractError(() => validateDeepDiveRequestInput({
-    ...deepDiveRequest,
-    quoteSnapshot: { ...cgPostQuote, type: "external_article" },
-  }, limits, testLanguages));
-  expectContractError(() => validateDeepDiveRequestInput({
-    ...deepDiveRequest,
-    quoteSnapshot: { ...cgPostQuote, language: "unknown" },
-  }, limits, testLanguages));
-  expectContractError(() => validateDeepDiveRequestInput({
-    ...deepDiveRequest,
-    quoteSnapshot: { ...cgPostQuote, capturedAt: "yesterday" },
-  }, limits, testLanguages));
-  expectContractError(() => validateDeepDiveRequestInput({
-    ...deepDiveRequest,
-    recentContext: Array(5).fill(deepDiveRequest.recentContext[0]),
-  }, limits, testLanguages));
-  expectContractError(() => validateDeepDiveRequestInput({
-    ...deepDiveRequest,
-    recentContext: [{ messageId: "m", role: "system", content: "untrusted" }],
-  }, limits, testLanguages));
-  expectContractError(() => validateDeepDiveRequestInput(deepDiveRequest, { ...limits, maxContextBytes: 8 }, testLanguages));
-  expectContractError(() => validateDeepDiveRequestInput({
-    ...deepDiveRequest,
-    responseConstraints: { ...deepDiveRequest.responseConstraints, schemaVersion: 2 },
-  }, limits, testLanguages));
-  expectContractError(() => validateDeepDiveRequestInput({ ...deepDiveRequest, schemaVersion: 99 }, limits, testLanguages));
-});
-
-test("restricted quota metadata is separate and rejects identity fields", () => {
-  const metadata = { schemaVersion: 1, requestId: "request-1", quotaSubject: "pseudonymous-subject" };
-  assert.deepEqual(validateRestrictedRequestMetadata(metadata, limits), metadata);
-  expectContractError(() => validateRestrictedRequestMetadata({ ...metadata, userId: "private-user" }, limits));
-});
-
-test("version negotiation selects a shared explicit version and fails closed when none exists", () => {
+test("preference schema change is negotiated explicitly and v1-only peers fail closed", () => {
+  assert.equal(negotiatePreferenceVersion([1, 2]), 2);
+  expectContractError(() => negotiatePreferenceVersion([1]));
+  expectContractError(() => negotiatePreferenceVersion([2, 2.5]));
   assert.equal(negotiateInputVersion([2, 1]), 1);
   expectContractError(() => negotiateInputVersion([2, 3]));
-  expectContractError(() => negotiateInputVersion([1, 1.5]));
 });
 
-test("bounds are required rather than supplied by hidden defaults", () => {
-  expectContractError(() => validateCanonicalPostInput(canonicalPost, undefined as unknown as ContractLimits, testLanguages));
-  expectContractError(() => validateCanonicalPostInput(canonicalPost, { ...limits, maxPayloadBytes: 0 }, testLanguages));
+test("Deep Dive supports zero or one root quote of either canonical quote type", () => {
+  const parsedWithPost = validateDeepDiveRequestInput(deepDiveRequest, limits, supportedLanguages);
+  assert.equal(parsedWithPost.quoteSnapshot?.type, "cg_post");
+  assert.equal(parsedWithPost.quoteSnapshot?.type === "cg_post" ? parsedWithPost.quoteSnapshot.contentHash : undefined, cgPostQuoteSnapshot.contentHash);
+  assert.equal(parsedWithPost.recentContext[1].quoteSnapshot?.type, "intelligence_insight");
+  assert.equal(parsedWithPost.responseConstraints.locale, "fr-NG");
+
+  const noQuote = { ...deepDiveRequest, quoteSnapshot: undefined };
+  assert.equal(validateDeepDiveRequestInput(noQuote, limits, supportedLanguages).quoteSnapshot, undefined);
+  const withInsight = { ...deepDiveRequest, quoteSnapshot: insightQuoteSnapshot };
+  assert.equal(validateDeepDiveRequestInput(withInsight, limits, supportedLanguages).quoteSnapshot?.type, "intelligence_insight");
+
+  const hashOnlyQuote = {
+    ...cgPostQuoteSnapshot,
+    postContentVersion: undefined,
+    source: undefined,
+    sourceSnapshotRef: undefined,
+    knownCurrentPostContentVersion: null,
+  };
+  const hashQuoteResult = validateDeepDiveRequestInput({ ...deepDiveRequest, quoteSnapshot: hashOnlyQuote }, limits, supportedLanguages);
+  assert.equal(hashQuoteResult.quoteSnapshot?.type === "cg_post" ? hashQuoteResult.quoteSnapshot.contentHash : undefined, cgPostQuoteSnapshot.contentHash);
+  assert.equal(hashQuoteResult.quoteSnapshot?.type === "cg_post" ? hashQuoteResult.quoteSnapshot.knownCurrentPostContentVersion : undefined, null);
+  expectContractError(() => validateDeepDiveRequestInput({ ...deepDiveRequest, quoteSnapshot: [cgPostQuoteSnapshot, insightQuoteSnapshot] }, limits, supportedLanguages));
+});
+
+test("Deep Dive preserves embedded context quotes and rejects malformed versions/unsupported quote or context shapes", () => {
+  const contextQuote = validateDeepDiveRequestInput(deepDiveRequest, limits, supportedLanguages).recentContext[1].quoteSnapshot;
+  assert.equal(contextQuote?.type, "intelligence_insight");
+  expectContractError(() => validateDeepDiveRequestInput({ ...deepDiveRequest, fullThread: [] }, limits, supportedLanguages));
+  expectContractError(() => validateDeepDiveRequestInput({ ...deepDiveRequest, userId: "synthetic-private-user" }, limits, supportedLanguages));
+  expectContractError(() => validateDeepDiveRequestInput({ ...deepDiveRequest, quoteSnapshots: [cgPostQuoteSnapshot, insightQuoteSnapshot] }, limits, supportedLanguages));
+  expectContractError(() => validateDeepDiveRequestInput(deepDiveRequest, { ...limits, maxPayloadBytes: 64 }, supportedLanguages));
+  expectContractError(() => validateDeepDiveRequestInput({ ...deepDiveRequest, schemaVersion: 99 }, limits, supportedLanguages));
+  expectContractError(() => validateDeepDiveRequestInput({ ...deepDiveRequest, quoteSnapshot: { ...cgPostQuoteSnapshot, type: "external_article" } }, limits, supportedLanguages));
+  expectContractError(() => validateDeepDiveRequestInput({ ...deepDiveRequest, quoteSnapshot: { ...cgPostQuoteSnapshot, language: "unknown" } }, limits, supportedLanguages));
+  expectContractError(() => validateDeepDiveRequestInput({ ...deepDiveRequest, quoteSnapshot: { ...cgPostQuoteSnapshot, capturedAt: "yesterday" } }, limits, supportedLanguages));
+  expectContractError(() => validateDeepDiveRequestInput({ ...deepDiveRequest, recentContext: Array(5).fill(deepDiveRequest.recentContext[0]) }, limits, supportedLanguages));
+  expectContractError(() => validateDeepDiveRequestInput({ ...deepDiveRequest, recentContext: [{ messageId: "synthetic-message", role: "system", content: "synthetic" }] }, limits, supportedLanguages));
+  expectContractError(() => validateDeepDiveRequestInput(deepDiveRequest, { ...limits, maxContextBytes: 8 }, supportedLanguages));
+  expectContractError(() => validateDeepDiveRequestInput({ ...deepDiveRequest, responseConstraints: { ...deepDiveRequest.responseConstraints, schemaVersion: 2 } }, limits, supportedLanguages));
+});
+
+test("restricted metadata is separate and does not admit raw identity to shared inputs", () => {
+  const metadata = { schemaVersion: 1, requestId: "synthetic-request-01", quotaSubject: "synthetic-quota-subject" };
+  assert.deepEqual(validateRestrictedRequestMetadata(metadata, limits), metadata);
+  expectContractError(() => validateRestrictedRequestMetadata({ ...metadata, userId: "synthetic-private-user" }, limits));
+});
+
+test("CG-to-TI mapping preserves canonical content and derives output language from the post", () => {
+  const mapped = mapCanonicalCgInputsToTi({
+    canonicalPost,
+    preferences: preferenceWithInterestsV2,
+    deepDiveRequest,
+  }, limits, supportedLanguages);
+  assert.equal(mapped.outputLanguage, canonicalPost.language);
+  assert.equal(mapped.canonicalPost.contentHash, canonicalPost.contentHash);
+  assert.equal(mapped.canonicalPost.sourceSnapshotRef, canonicalPost.sourceSnapshotRef);
+  assert.deepEqual(mapped.preferences.selectedInterests, validatePreferenceInput(preferenceWithInterestsV2, limits).selectedInterests);
+  assert.equal(mapped.deepDiveRequest?.quoteSnapshot?.type, "cg_post");
+  expectContractError(() => mapCanonicalCgInputsToTi({ canonicalPost, preferences: preferenceWithInterestsV2, outputLanguage: "en" }, limits, supportedLanguages));
+  expectContractError(() => mapCanonicalCgInputsToTi({ canonicalPost, preferences: { ...canonicalPreferenceV2, userId: "synthetic-private-user" } }, limits, supportedLanguages));
+});
+
+test("contract bounds require explicit positive configuration", () => {
+  expectContractError(() => validateCanonicalPostInput(canonicalPost, undefined as unknown as ContractLimits, supportedLanguages));
+  expectContractError(() => validateCanonicalPostInput(canonicalPost, { ...limits, maxPayloadBytes: 0 }, supportedLanguages));
 });
