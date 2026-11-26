@@ -12,6 +12,7 @@
     "lint": "tsc --noEmit",
     "test:ti-contracts": "tsx --test server/ti/contracts.test.ts",
     "test:ti-persistence": "tsx --test server/ti/persistence.test.ts",
+    "test:ti-cache-keys": "tsx --test server/ti/cache-keys.test.ts",
     "cap:init": "npx cap init",
     "cap:add:android": "npx cap add android",
     "cap:sync": "npm run build && npx cap sync",
