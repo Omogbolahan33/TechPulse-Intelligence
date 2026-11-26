@@ -5,6 +5,7 @@ export const SUPPORTED_TI_INPUT_VERSIONS = [CURRENT_TI_INPUT_VERSION] as const;
 // A peer must negotiate v2; incomplete v1 preferences are never silently upgraded.
 export const CURRENT_PREFERENCE_INPUT_VERSION = 2 as const;
 export const SUPPORTED_PREFERENCE_INPUT_VERSIONS = [CURRENT_PREFERENCE_INPUT_VERSION] as const;
+export const SUPPORTED_DEEP_DIVE_INPUT_VERSIONS = [1, 2] as const;
 
 export const APPROVED_PERSONA_IDS = [
   "Founder",
@@ -45,12 +46,17 @@ export interface CanonicalPostInputV1 {
   readonly content: string;
   /** TI accepts only known, non-null canonical languages; the source field is nullable. */
   readonly language: string;
+  /** CG's content representation is carried through the strict TI projection when present. */
+  readonly contentFormat?: string;
   readonly categoryId: StableId;
   readonly subcategoryId: string;
   readonly topicIds: readonly string[];
   readonly source?: LinkedSourceV1;
   readonly moderationState: string;
   readonly publicationState: string;
+  readonly sourceVersion?: StableId;
+  readonly sourceSnapshotReference?: string;
+  /** @deprecated TI's pre-CG adapter alias; new CG mappings use sourceSnapshotReference. */
   readonly sourceSnapshotRef?: string;
 }
 
@@ -71,8 +77,6 @@ export interface PreferenceInputV2 {
   readonly interestTaxonomyVersion: string;
 }
 
-/** @deprecated Use PreferenceInputV2; v1 is deliberately not negotiated. */
-export type PreferenceInputV1 = PreferenceInputV2;
 
 export interface CGPostQuoteSnapshotV1 {
   readonly type: "cg_post";
@@ -82,7 +86,11 @@ export interface CGPostQuoteSnapshotV1 {
   readonly title: string;
   readonly content: string;
   readonly language: string;
+  readonly contentFormat?: string;
   readonly source?: LinkedSourceV1;
+  readonly sourceVersion?: StableId;
+  readonly sourceSnapshotReference?: string;
+  /** @deprecated TI's pre-CG adapter alias. */
   readonly sourceSnapshotRef?: string;
   readonly capturedAt: string;
   /** Required nullable value: null means CG did not supply a current version. */
@@ -127,6 +135,57 @@ export interface DeepDiveRequestInputV1 {
   readonly recentContext: readonly RecentContextItemV1[];
   readonly quoteSnapshot?: QuoteSnapshotV1;
   readonly responseConstraints: DeepDiveResponseConstraintsV1;
+}
+
+export type JsonValue = string | number | boolean | null | readonly JsonValue[] | { readonly [key: string]: JsonValue };
+export type JsonObject = { readonly [key: string]: JsonValue };
+
+/** Normalized form retaining the CG quote envelope and exact nested post/insight projection. */
+export interface TiMappedCgQuoteV2 {
+  readonly quoteId: string;
+  readonly parentPostId: string;
+  readonly parentPostContentVersion: StableId | null;
+  readonly snapshot: QuoteSnapshotV1;
+}
+
+export interface DeepDiveResponseConstraintsV2 {
+  readonly schemaVersion: 2;
+  readonly responseSchemaVersion: string;
+  readonly postLanguage: string;
+  /** Bounded opaque JSON preserved verbatim; the adapter does not invent policy values. */
+  readonly safetyRequirements: JsonObject;
+}
+
+export interface DeepDiveContextItemV2 {
+  readonly messageId: string;
+  readonly role: "user" | "assistant";
+  readonly content: string;
+  readonly quote?: TiMappedCgQuoteV2;
+}
+
+/** Versioned TI normalization of the canonical CG dispatch envelope. */
+export interface DeepDiveRequestInputV2 {
+  readonly schemaVersion: 2;
+  readonly userMessageId: string;
+  readonly requestRef: string;
+  readonly conversationRef: string;
+  readonly currentMessage: string;
+  readonly recentContext: readonly DeepDiveContextItemV2[];
+  readonly quote?: TiMappedCgQuoteV2;
+  readonly responseConstraints: DeepDiveResponseConstraintsV2;
+}
+
+export interface CgDispatchQuoteProjector {
+  (cgStoredQuote: unknown): TiMappedCgQuoteV2;
+}
+
+/** Canonical CG quote-v1 envelope: common parent metadata plus exactly one nested snapshot. */
+export interface CanonicalCgQuoteSnapshotV1 {
+  readonly quoteId: string;
+  readonly parentPostId: string;
+  readonly parentPostContentVersion: StableId | null;
+  readonly post?: Omit<CGPostQuoteSnapshotV1, "type">;
+  readonly insight?: Omit<IntelligenceInsightQuoteSnapshotV1, "type">;
 }
 
 /** Restricted operation metadata is deliberately separate from shared artifact inputs. */
@@ -307,9 +366,12 @@ export function validateCanonicalPostInput(
   assertKeys(
     value,
     ["schemaVersion", "postId", "title", "content", "language", "categoryId", "subcategoryId", "topicIds", "moderationState", "publicationState"],
-    ["postContentVersion", "contentHash", "source", "sourceSnapshotRef"],
+    ["postContentVersion", "contentHash", "contentFormat", "source", "sourceVersion", "sourceSnapshotReference", "sourceSnapshotRef"],
     path,
   );
+  if (value.sourceSnapshotRef !== undefined && value.sourceSnapshotReference !== undefined) {
+    fail(`${path}.sourceSnapshotRef`, "legacy and canonical snapshot reference fields cannot both be supplied");
+  }
   readVersion1(value, path);
   assertPostVersion(value, `${path}.version`);
   if (value.contentHash !== undefined) readString(value.contentHash, `${path}.contentHash`, limits);
@@ -324,18 +386,35 @@ export function validateCanonicalPostInput(
     title: readString(value.title, `${path}.title`, limits),
     content: readString(value.content, `${path}.content`, limits),
     language: readKnownLanguage(value.language, `${path}.language`, limits, supportedLanguages),
+    ...(value.contentFormat === undefined ? {} : { contentFormat: readString(value.contentFormat, `${path}.contentFormat`, limits) }),
     categoryId: readStableId(value.categoryId, `${path}.categoryId`, limits),
     subcategoryId: readString(value.subcategoryId, `${path}.subcategoryId`, limits),
     topicIds: readStringArray(value.topicIds, `${path}.topicIds`, limits),
     ...(source === undefined ? {} : { source }),
     moderationState: readString(value.moderationState, `${path}.moderationState`, limits),
     publicationState: readString(value.publicationState, `${path}.publicationState`, limits),
+    ...(value.sourceVersion === undefined ? {} : { sourceVersion: readVersionValue(value.sourceVersion, `${path}.sourceVersion`, limits) }),
+    ...(value.sourceSnapshotReference === undefined ? {} : { sourceSnapshotReference: readString(value.sourceSnapshotReference, `${path}.sourceSnapshotReference`, limits) }),
     ...(value.sourceSnapshotRef === undefined
       ? {}
       : { sourceSnapshotRef: readString(value.sourceSnapshotRef, `${path}.sourceSnapshotRef`, limits) }),
   };
   assertPayloadSize(input, limits.maxPayloadBytes, path);
   return result;
+}
+
+export type CanonicalCgPostInputV1 = CanonicalPostInputV1 & { readonly contentFormat: string };
+
+/** Validates the canonical CG post reference shape, including CG-only fields TI must not drop. */
+export function validateCanonicalCgPostInput(
+  input: unknown,
+  limits: ContractLimits,
+  supportedLanguages: readonly string[],
+): CanonicalCgPostInputV1 {
+  const post = validateCanonicalPostInput(input, limits, supportedLanguages);
+  if (post.contentFormat === undefined) fail("canonicalPost.contentFormat", "required canonical CG field is missing");
+  if (post.sourceSnapshotRef !== undefined) fail("canonicalPost.sourceSnapshotRef", "legacy TI alias is not valid in a canonical CG payload");
+  return post as CanonicalCgPostInputV1;
 }
 
 export function validatePreferenceInput(
@@ -389,6 +468,18 @@ export function validatePreferenceInput(
   return result;
 }
 
+/** Selects the highest shared Deep Dive schema; both v1 TI and v2 CG-mapped requests are explicit. */
+export function negotiateDeepDiveInputVersion(offeredVersions: readonly number[]): typeof SUPPORTED_DEEP_DIVE_INPUT_VERSIONS[number] {
+  if (!Array.isArray(offeredVersions) || offeredVersions.some((version) => !Number.isSafeInteger(version))) {
+    fail("offeredDeepDiveVersions", "must contain only integer versions");
+  }
+  const common = offeredVersions.filter((version): version is typeof SUPPORTED_DEEP_DIVE_INPUT_VERSIONS[number] =>
+    (SUPPORTED_DEEP_DIVE_INPUT_VERSIONS as readonly number[]).includes(version),
+  );
+  if (common.length === 0) fail("offeredDeepDiveVersions", "no supported Deep Dive schema was offered");
+  return Math.max(...common) as typeof SUPPORTED_DEEP_DIVE_INPUT_VERSIONS[number];
+}
+
 /** Selects the highest explicitly shared preference schema; v1 cannot omit required metadata. */
 export function negotiatePreferenceVersion(offeredVersions: readonly number[]): typeof CURRENT_PREFERENCE_INPUT_VERSION {
   if (!Array.isArray(offeredVersions) || offeredVersions.some((version) => !Number.isSafeInteger(version))) {
@@ -419,9 +510,12 @@ function readQuoteSnapshot(
     assertKeys(
       quote,
       ["type", "postId", "title", "content", "language", "capturedAt", "knownCurrentPostContentVersion"],
-      ["postContentVersion", "contentHash", "source", "sourceSnapshotRef"],
+      ["postContentVersion", "contentHash", "contentFormat", "source", "sourceVersion", "sourceSnapshotReference", "sourceSnapshotRef"],
       path,
     );
+    if (quote.sourceSnapshotRef !== undefined && quote.sourceSnapshotReference !== undefined) {
+      fail(`${path}.sourceSnapshotRef`, "legacy and canonical snapshot reference fields cannot both be supplied");
+    }
     assertPostVersion(quote, path);
     const source = readOptionalSource(quote, limits, path);
     return {
@@ -434,7 +528,10 @@ function readQuoteSnapshot(
       title: readString(quote.title, `${path}.title`, limits),
       content: readString(quote.content, `${path}.content`, limits),
       language: readKnownLanguage(quote.language, `${path}.language`, limits, supportedLanguages),
+      ...(quote.contentFormat === undefined ? {} : { contentFormat: readString(quote.contentFormat, `${path}.contentFormat`, limits) }),
       ...(source === undefined ? {} : { source }),
+      ...(quote.sourceVersion === undefined ? {} : { sourceVersion: readVersionValue(quote.sourceVersion, `${path}.sourceVersion`, limits) }),
+      ...(quote.sourceSnapshotReference === undefined ? {} : { sourceSnapshotReference: readString(quote.sourceSnapshotReference, `${path}.sourceSnapshotReference`, limits) }),
       ...(quote.sourceSnapshotRef === undefined
         ? {}
         : { sourceSnapshotRef: readString(quote.sourceSnapshotRef, `${path}.sourceSnapshotRef`, limits) }),
@@ -550,6 +647,158 @@ export function validateDeepDiveRequestInput(
   return result;
 }
 
+function readJsonValue(value: unknown, path: string, limits: ContractLimits, depth = 0): JsonValue {
+  if (depth > 24) fail(path, "exceeds JSON nesting bound");
+  if (value === null) return null;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") return readString(value, path, limits, { allowEmpty: true });
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) fail(path, "must contain finite JSON numbers");
+    return value;
+  }
+  if (Array.isArray(value)) {
+    if (value.length > limits.maxArrayItems) fail(path, `exceeds configured JSON array bound (${limits.maxArrayItems})`);
+    return value.map((item, index) => readJsonValue(item, `${path}[${index}]`, limits, depth + 1));
+  }
+  const object = asRecord(value, path);
+  return Object.fromEntries(Object.entries(object).map(([key, child]) => {
+    readString(key, `${path} key`, limits);
+    return [key, readJsonValue(child, `${path}.${key}`, limits, depth + 1)];
+  }));
+}
+
+export function mapCanonicalCgQuoteSnapshotToTi(
+  input: unknown,
+  limits: ContractLimits,
+  supportedLanguages: readonly string[],
+): TiMappedCgQuoteV2 {
+  const path = "cgQuoteSnapshot";
+  const quote = asRecord(input, path);
+  assertKeys(quote, ["quoteId", "parentPostId", "parentPostContentVersion"], ["post", "insight"], path);
+  const hasPost = Object.hasOwn(quote, "post");
+  const hasInsight = Object.hasOwn(quote, "insight");
+  if (hasPost === hasInsight) fail(path, "must contain exactly one nested post or insight snapshot");
+  const parentPostContentVersion = quote.parentPostContentVersion === null
+    ? null
+    : readVersionValue(quote.parentPostContentVersion, `${path}.parentPostContentVersion`, limits);
+  const nestedSnapshot = hasPost
+    ? asRecord(quote.post, `${path}.post`)
+    : asRecord(quote.insight, `${path}.insight`);
+  if (Object.hasOwn(nestedSnapshot, "type")) fail(`${path}.snapshot.type`, "snapshot discriminator is derived from its enclosing CG field");
+  if (hasPost && Object.hasOwn(nestedSnapshot, "sourceSnapshotRef")) {
+    fail(`${path}.post.sourceSnapshotRef`, "legacy TI alias is not valid in a canonical CG quote snapshot");
+  }
+  const snapshotValue = hasPost
+    ? { ...nestedSnapshot, type: "cg_post" }
+    : { ...nestedSnapshot, type: "intelligence_insight" };
+  return {
+    quoteId: readString(quote.quoteId, `${path}.quoteId`, limits),
+    parentPostId: readString(quote.parentPostId, `${path}.parentPostId`, limits),
+    parentPostContentVersion,
+    snapshot: readQuoteSnapshot(snapshotValue, limits, `${path}.snapshot`, supportedLanguages),
+  };
+}
+
+function readTiMappedCgQuote(
+  input: unknown,
+  limits: ContractLimits,
+  supportedLanguages: readonly string[],
+  path: string,
+): TiMappedCgQuoteV2 {
+  const quote = asRecord(input, path);
+  assertKeys(quote, ["quoteId", "parentPostId", "parentPostContentVersion", "snapshot"], [], path);
+  const parentVersion = quote.parentPostContentVersion === null
+    ? null
+    : readVersionValue(quote.parentPostContentVersion, `${path}.parentPostContentVersion`, limits);
+  return {
+    quoteId: readString(quote.quoteId, `${path}.quoteId`, limits),
+    parentPostId: readString(quote.parentPostId, `${path}.parentPostId`, limits),
+    parentPostContentVersion: parentVersion,
+    snapshot: readQuoteSnapshot(quote.snapshot, limits, `${path}.snapshot`, supportedLanguages),
+  };
+}
+
+/**
+ * Maps the known CG dispatch envelope names/shapes into a versioned TI request.
+ * Stored quote-v1 payloads are projected by an explicit adapter because CG owns
+ * their nested schema; a present quote is never discarded or guessed at here.
+ */
+export function mapCanonicalCgDeepDiveDispatchToTi(
+  input: unknown,
+  canonicalPostInput: unknown,
+  limits: ContractLimits,
+  supportedLanguages: readonly string[],
+  projectCgQuote?: CgDispatchQuoteProjector,
+): DeepDiveRequestInputV2 {
+  assertLimits(limits);
+  const canonicalPost = validateCanonicalCgPostInput(canonicalPostInput, limits, supportedLanguages);
+  const path = "cgDeepDiveDispatch";
+  const dispatch = asRecord(input, path);
+  assertKeys(dispatch,
+    ["userMessageId", "requestReference", "conversationRef", "currentMessage", "recentContext", "responseConstraints"],
+    [], path);
+
+  const quoteProjector: CgDispatchQuoteProjector = projectCgQuote
+    ?? ((value) => mapCanonicalCgQuoteSnapshotToTi(value, limits, supportedLanguages));
+  const projectQuote = (value: unknown, quotePath: string): TiMappedCgQuoteV2 =>
+    readTiMappedCgQuote(quoteProjector(value), limits, supportedLanguages, quotePath);
+  const current = asRecord(dispatch.currentMessage, `${path}.currentMessage`);
+  assertKeys(current, ["text"], ["quote"], `${path}.currentMessage`);
+  const contextInput = dispatch.recentContext;
+  if (!Array.isArray(contextInput)) fail(`${path}.recentContext`, "must be an array");
+  if (contextInput.length > limits.maxContextItems) {
+    fail(`${path}.recentContext`, `exceeds configured context item bound (${limits.maxContextItems})`);
+  }
+  let contextBytes = 0;
+  const recentContext = contextInput.map((entry, index): DeepDiveContextItemV2 => {
+    const itemPath = `${path}.recentContext[${index}]`;
+    const item = asRecord(entry, itemPath);
+    assertKeys(item, ["messageId", "role", "text"], ["quote"], itemPath);
+    if (item.role !== "user" && item.role !== "assistant") fail(`${itemPath}.role`, "must be user or assistant");
+    const normalized: DeepDiveContextItemV2 = {
+      messageId: readString(item.messageId, `${itemPath}.messageId`, limits),
+      role: item.role,
+      content: readString(item.text, `${itemPath}.text`, limits),
+      ...(item.quote === undefined ? {} : { quote: projectQuote(item.quote, `${itemPath}.quote`) }),
+    };
+    contextBytes += new TextEncoder().encode(JSON.stringify(normalized)).byteLength;
+    return normalized;
+  });
+  if (contextBytes > limits.maxContextBytes) {
+    fail(`${path}.recentContext`, `exceeds configured context byte bound (${limits.maxContextBytes} bytes)`);
+  }
+
+  const constraints = asRecord(dispatch.responseConstraints, `${path}.responseConstraints`);
+  assertKeys(constraints, ["responseSchemaVersion", "postLanguage", "safetyRequirements"], [], `${path}.responseConstraints`);
+  const postLanguage = readKnownLanguage(constraints.postLanguage, `${path}.responseConstraints.postLanguage`, limits, supportedLanguages);
+  if (postLanguage !== canonicalPost.language) {
+    fail(`${path}.responseConstraints.postLanguage`, "must equal the linked canonical post language");
+  }
+  const currentMessage = readString(current.text, `${path}.currentMessage.text`, limits);
+  const safetyRequirementsValue = readJsonValue(constraints.safetyRequirements, `${path}.responseConstraints.safetyRequirements`, limits);
+  if (safetyRequirementsValue === null || Array.isArray(safetyRequirementsValue) || typeof safetyRequirementsValue !== "object") {
+    fail(`${path}.responseConstraints.safetyRequirements`, "must be a JSON object");
+  }
+  const result: DeepDiveRequestInputV2 = {
+    schemaVersion: 2,
+    userMessageId: readString(dispatch.userMessageId, `${path}.userMessageId`, limits),
+    requestRef: readString(dispatch.requestReference, `${path}.requestReference`, limits),
+    conversationRef: readString(dispatch.conversationRef, `${path}.conversationRef`, limits),
+    currentMessage,
+    recentContext,
+    ...(current.quote === undefined ? {} : { quote: projectQuote(current.quote, `${path}.currentMessage.quote`) }),
+    responseConstraints: {
+      schemaVersion: 2,
+      responseSchemaVersion: readString(constraints.responseSchemaVersion, `${path}.responseConstraints.responseSchemaVersion`, limits),
+      postLanguage,
+      safetyRequirements: safetyRequirementsValue as JsonObject,
+    },
+  };
+  assertPayloadSize(input, limits.maxPayloadBytes, path);
+  assertPayloadSize(result, limits.maxPayloadBytes, `${path}.normalized`);
+  return result;
+}
+
 export interface TiInputMappingV1 {
   readonly schemaVersion: 1;
   readonly canonicalPost: CanonicalPostInputV1;
@@ -569,7 +818,7 @@ export function mapCanonicalCgInputsToTi(
   const path = "cgToTi";
   const value = asRecord(input, path);
   assertKeys(value, ["canonicalPost", "preferences"], ["deepDiveRequest"], path);
-  const canonicalPost = validateCanonicalPostInput(value.canonicalPost, limits, supportedLanguages);
+  const canonicalPost = validateCanonicalCgPostInput(value.canonicalPost, limits, supportedLanguages);
   const preferences = validatePreferenceInput(value.preferences, limits);
   const deepDiveRequest = value.deepDiveRequest === undefined
     ? undefined

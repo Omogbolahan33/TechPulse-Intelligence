@@ -1,5 +1,5 @@
 /** Synthetic, immutable CG contract examples. No production values or user identity. */
-function deepFreeze<T>(value: T): T {
+function deepFreeze<const T>(value: T): T {
   if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
     Object.freeze(value);
     for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
@@ -15,6 +15,7 @@ export const canonicalPost = deepFreeze({
   title: "Synthetic multilingual technology post",
   content: "Texte synthétique sur une technologie émergente.",
   language: "fr",
+  contentFormat: "text/markdown",
   categoryId: "synthetic-category-02",
   subcategoryId: "synthetic-subcategory-05",
   topicIds: ["synthetic-topic-ai", "synthetic-topic-policy"],
@@ -24,7 +25,8 @@ export const canonicalPost = deepFreeze({
   },
   moderationState: "visible",
   publicationState: "published",
-  sourceSnapshotRef: "synthetic-source-snapshot-03",
+  sourceVersion: "synthetic-source-version-05",
+  sourceSnapshotReference: "synthetic-source-snapshot-03",
 });
 
 export const canonicalPreferenceV2 = deepFreeze({
@@ -54,8 +56,10 @@ export const cgPostQuoteSnapshot = deepFreeze({
   title: "Synthetic quoted post",
   content: "Quoted synthetic content with multilingual context.",
   language: "fr",
+  contentFormat: "text/markdown",
   source: { url: "https://publisher.example/synthetic-original", attribution: "Synthetic Publisher" },
-  sourceSnapshotRef: "synthetic-source-snapshot-03",
+  sourceVersion: "synthetic-source-version-05",
+  sourceSnapshotReference: "synthetic-source-snapshot-03",
   capturedAt: "2026-11-26T08:00:00Z",
   knownCurrentPostContentVersion: "synthetic-post-version-04",
 });
@@ -69,6 +73,60 @@ export const insightQuoteSnapshot = deepFreeze({
   language: "fr",
   capturedAt: "2026-11-26T08:01:00Z",
   knownCurrentArtifactVersion: null,
+});
+
+export const cgPostQuoteEnvelope = deepFreeze({
+  quoteId: "synthetic-cg-quote-post-01",
+  parentPostId: "synthetic-post-01",
+  parentPostContentVersion: "synthetic-post-version-03",
+  post: {
+    postId: "synthetic-post-01",
+    postContentVersion: "synthetic-post-version-03",
+    contentHash: "sha256:synthetic-post-hash",
+    title: "Synthetic quoted post",
+    content: "Quoted synthetic content with multilingual context.",
+    language: "fr",
+    contentFormat: "text/markdown",
+    source: { url: "https://publisher.example/synthetic-original", attribution: "Synthetic Publisher" },
+    sourceVersion: "synthetic-source-version-05",
+    sourceSnapshotReference: "synthetic-source-snapshot-03",
+    capturedAt: "2026-11-26T08:00:00Z",
+    knownCurrentPostContentVersion: "synthetic-post-version-04",
+  },
+});
+
+export const cgInsightQuoteEnvelope = deepFreeze({
+  quoteId: "synthetic-cg-quote-insight-01",
+  parentPostId: "synthetic-post-01",
+  parentPostContentVersion: "synthetic-post-version-03",
+  insight: {
+    artifactId: "synthetic-artifact-01",
+    artifactVersion: "synthetic-artifact-version-02",
+    itemId: "synthetic-item-01",
+    content: "Synthetic intelligence insight.",
+    language: "fr",
+    capturedAt: "2026-11-26T08:01:00Z",
+    knownCurrentArtifactVersion: null,
+  },
+});
+
+export const cgDeepDiveDispatch = deepFreeze({
+  userMessageId: "synthetic-message-01",
+  requestReference: "synthetic-request-reference-01",
+  conversationRef: "synthetic-conversation-ref-01",
+  currentMessage: {
+    text: "Que signifie cette affirmation synthétique ?",
+    quote: cgPostQuoteEnvelope,
+  },
+  recentContext: [
+    { messageId: "synthetic-message-previous", role: "user", text: "Question précédente synthétique." },
+    { messageId: "synthetic-message-answer", role: "assistant", text: "Réponse précédente synthétique.", quote: cgInsightQuoteEnvelope },
+  ],
+  responseConstraints: {
+    responseSchemaVersion: "synthetic-deep-dive-v2",
+    postLanguage: "fr",
+    safetyRequirements: { groundingRequired: true, noRawIdentity: true },
+  },
 });
 
 export const deepDiveRequest = deepFreeze({

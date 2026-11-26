@@ -4,9 +4,13 @@ import {
   APPROVED_PERSONA_IDS,
   ContractValidationError,
   mapCanonicalCgInputsToTi,
+  mapCanonicalCgDeepDiveDispatchToTi,
+  mapCanonicalCgQuoteSnapshotToTi,
   negotiateInputVersion,
+  negotiateDeepDiveInputVersion,
   negotiatePreferenceVersion,
   validateCanonicalPostInput,
+  validateCanonicalCgPostInput,
   validateDeepDiveRequestInput,
   validatePreferenceInput,
   validateRestrictedRequestMetadata,
@@ -15,6 +19,9 @@ import {
 import {
   canonicalPost,
   canonicalPreferenceV2,
+  cgDeepDiveDispatch,
+  cgPostQuoteEnvelope,
+  cgInsightQuoteEnvelope,
   cgPostQuoteSnapshot,
   deepDiveRequest,
   insightQuoteSnapshot,
@@ -36,7 +43,7 @@ function expectContractError(action: () => unknown): void {
 }
 
 test("canonical fixtures are deeply immutable and contain synthetic CG-shaped inputs", () => {
-  for (const value of [canonicalPost, canonicalPreferenceV2, preferenceWithInterestsV2, deepDiveRequest]) {
+  for (const value of [canonicalPost, canonicalPreferenceV2, preferenceWithInterestsV2, deepDiveRequest, cgDeepDiveDispatch]) {
     assert.ok(Object.isFrozen(value));
   }
   assert.ok(Object.isFrozen(canonicalPost.source));
@@ -51,7 +58,10 @@ test("canonical post preserves version/hash, language, source and snapshot prove
   assert.equal(parsed.contentHash, canonicalPost.contentHash);
   assert.equal(parsed.language, "fr");
   assert.deepEqual(parsed.source, canonicalPost.source);
-  assert.equal(parsed.sourceSnapshotRef, canonicalPost.sourceSnapshotRef);
+  assert.equal(parsed.contentFormat, canonicalPost.contentFormat);
+  assert.equal(parsed.sourceVersion, canonicalPost.sourceVersion);
+  assert.equal(parsed.sourceSnapshotReference, canonicalPost.sourceSnapshotReference);
+  assert.equal(validateCanonicalCgPostInput(canonicalPost, limits, supportedLanguages).contentFormat, "text/markdown");
 
   const versionOnly = { ...canonicalPost, contentHash: undefined };
   assert.equal(validateCanonicalPostInput(versionOnly, limits, supportedLanguages).postContentVersion, canonicalPost.postContentVersion);
@@ -75,6 +85,8 @@ test("canonical post rejects malformed versions, privacy fields, unknown fields,
   expectContractError(() => validateCanonicalPostInput({ ...canonicalPost, userId: "synthetic-private-user" }, limits, supportedLanguages));
   expectContractError(() => validateCanonicalPostInput({ ...canonicalPost, language: null }, limits, supportedLanguages));
   expectContractError(() => validateCanonicalPostInput({ ...canonicalPost, language: "not-enabled" }, limits, supportedLanguages));
+  expectContractError(() => validateCanonicalCgPostInput({ ...canonicalPost, contentFormat: undefined }, limits, supportedLanguages));
+  expectContractError(() => validateCanonicalCgPostInput({ ...canonicalPost, sourceSnapshotRef: "synthetic-legacy-alias" }, limits, supportedLanguages));
 });
 
 test("post bounds enforce Unicode code points, arrays, and serialized bytes", () => {
@@ -189,11 +201,63 @@ test("CG-to-TI mapping preserves canonical content and derives output language f
   }, limits, supportedLanguages);
   assert.equal(mapped.outputLanguage, canonicalPost.language);
   assert.equal(mapped.canonicalPost.contentHash, canonicalPost.contentHash);
-  assert.equal(mapped.canonicalPost.sourceSnapshotRef, canonicalPost.sourceSnapshotRef);
+  assert.equal(mapped.canonicalPost.contentFormat, canonicalPost.contentFormat);
+  assert.equal(mapped.canonicalPost.sourceVersion, canonicalPost.sourceVersion);
+  assert.equal(mapped.canonicalPost.sourceSnapshotReference, canonicalPost.sourceSnapshotReference);
   assert.deepEqual(mapped.preferences.selectedInterests, validatePreferenceInput(preferenceWithInterestsV2, limits).selectedInterests);
   assert.equal(mapped.deepDiveRequest?.quoteSnapshot?.type, "cg_post");
   expectContractError(() => mapCanonicalCgInputsToTi({ canonicalPost, preferences: preferenceWithInterestsV2, outputLanguage: "en" }, limits, supportedLanguages));
   expectContractError(() => mapCanonicalCgInputsToTi({ canonicalPost, preferences: { ...canonicalPreferenceV2, userId: "synthetic-private-user" } }, limits, supportedLanguages));
+});
+
+test("Deep Dive v1/v2 negotiation is explicit and fails when no supported schema is offered", () => {
+  assert.equal(negotiateDeepDiveInputVersion([1, 2]), 2);
+  assert.equal(negotiateDeepDiveInputVersion([1]), 1);
+  expectContractError(() => negotiateDeepDiveInputVersion([3]));
+  expectContractError(() => negotiateDeepDiveInputVersion([2, 1.5]));
+});
+
+test("CG quote-v1 mapper preserves outer quote ID/parent version and maps nested post or insight", () => {
+  const postQuote = mapCanonicalCgQuoteSnapshotToTi(cgPostQuoteEnvelope, limits, supportedLanguages);
+  assert.equal(postQuote.quoteId, cgPostQuoteEnvelope.quoteId);
+  assert.equal(postQuote.parentPostId, cgPostQuoteEnvelope.parentPostId);
+  assert.equal(postQuote.parentPostContentVersion, cgPostQuoteEnvelope.parentPostContentVersion);
+  assert.equal(postQuote.snapshot.type, "cg_post");
+  assert.equal(postQuote.snapshot.type === "cg_post" ? postQuote.snapshot.sourceVersion : undefined, "synthetic-source-version-05");
+  const insightQuote = mapCanonicalCgQuoteSnapshotToTi(cgInsightQuoteEnvelope, limits, supportedLanguages);
+  assert.equal(insightQuote.quoteId, cgInsightQuoteEnvelope.quoteId);
+  assert.equal(insightQuote.snapshot.type, "intelligence_insight");
+  expectContractError(() => mapCanonicalCgQuoteSnapshotToTi({ ...cgPostQuoteEnvelope, insight: cgInsightQuoteEnvelope.insight }, limits, supportedLanguages));
+  expectContractError(() => mapCanonicalCgQuoteSnapshotToTi({ ...cgPostQuoteEnvelope, unknown: "field" }, limits, supportedLanguages));
+  expectContractError(() => mapCanonicalCgQuoteSnapshotToTi({ ...cgPostQuoteEnvelope, post: { ...cgPostQuoteEnvelope.post, type: "intelligence_insight" } }, limits, supportedLanguages));
+  expectContractError(() => mapCanonicalCgQuoteSnapshotToTi({ ...cgPostQuoteEnvelope, post: { ...cgPostQuoteEnvelope.post, sourceSnapshotRef: "synthetic-legacy-ref" } }, limits, supportedLanguages));
+});
+
+test("CG Deep Dive dispatch maps requestReference, text/quote fields and response constraints without inventing IDs", () => {
+  const mapped = mapCanonicalCgDeepDiveDispatchToTi(cgDeepDiveDispatch, canonicalPost, limits, supportedLanguages);
+  assert.equal(mapped.schemaVersion, 2);
+  assert.equal(mapped.requestRef, cgDeepDiveDispatch.requestReference);
+  assert.equal(mapped.userMessageId, cgDeepDiveDispatch.userMessageId);
+  assert.equal(mapped.currentMessage, cgDeepDiveDispatch.currentMessage.text);
+  assert.equal(mapped.quote?.quoteId, cgPostQuoteEnvelope.quoteId);
+  assert.equal(mapped.quote?.parentPostContentVersion, canonicalPost.postContentVersion);
+  assert.equal(mapped.quote?.snapshot.type, "cg_post");
+  assert.equal(mapped.recentContext[1].content, cgDeepDiveDispatch.recentContext[1].text);
+  assert.equal(mapped.recentContext[1].quote?.snapshot.type, "intelligence_insight");
+  assert.deepEqual(mapped.responseConstraints.safetyRequirements, cgDeepDiveDispatch.responseConstraints.safetyRequirements);
+  assert.equal(mapped.responseConstraints.postLanguage, canonicalPost.language);
+
+  const noQuotes = {
+    ...cgDeepDiveDispatch,
+    currentMessage: { text: cgDeepDiveDispatch.currentMessage.text },
+    recentContext: [{ messageId: "synthetic-context-only", role: "user", text: "synthetic" }],
+  };
+  assert.equal(mapCanonicalCgDeepDiveDispatchToTi(noQuotes, canonicalPost, limits, supportedLanguages).quote, undefined);
+  expectContractError(() => mapCanonicalCgDeepDiveDispatchToTi({ ...cgDeepDiveDispatch, responseConstraints: { ...cgDeepDiveDispatch.responseConstraints, postLanguage: "en" } }, canonicalPost, limits, supportedLanguages));
+  expectContractError(() => mapCanonicalCgDeepDiveDispatchToTi({ ...cgDeepDiveDispatch, userId: "synthetic-private-user" }, canonicalPost, limits, supportedLanguages));
+  expectContractError(() => mapCanonicalCgDeepDiveDispatchToTi({ ...cgDeepDiveDispatch, currentMessage: { ...cgDeepDiveDispatch.currentMessage, quotes: [cgPostQuoteEnvelope, cgInsightQuoteEnvelope] } }, canonicalPost, limits, supportedLanguages));
+  expectContractError(() => mapCanonicalCgDeepDiveDispatchToTi(cgDeepDiveDispatch, canonicalPost, { ...limits, maxPayloadBytes: 64 }, supportedLanguages));
+  expectContractError(() => mapCanonicalCgDeepDiveDispatchToTi({ ...cgDeepDiveDispatch, responseConstraints: { ...cgDeepDiveDispatch.responseConstraints, safetyRequirements: "not-an-object" } }, canonicalPost, limits, supportedLanguages));
 });
 
 test("contract bounds require explicit positive configuration", () => {
